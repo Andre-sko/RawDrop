@@ -755,19 +755,21 @@ Google is more realistic.
 ### Setting it up (Docker, Switzerland as the example)
 
 ```bash
-# 1. Download the map extract for your region (Switzerland ~400MB)
-wget https://download.geofabrik.de/europe/switzerland-latest.osm.pbf
+# 1. Download the map extract for your region (Switzerland ~400MB) into
+#    its own folder — keeps it separate from the rest of the project
+mkdir -p switzerland
+wget -P switzerland https://download.geofabrik.de/europe/switzerland-latest.osm.pbf
 
 # 2. Pre-process it (one-off; needs several GB of RAM and some patience)
-docker run -t -v "${PWD}:/data" ghcr.io/project-osrm/osrm-backend \
+docker run -t -v "${PWD}/switzerland:/data" ghcr.io/project-osrm/osrm-backend \
   osrm-extract -p /opt/car.lua /data/switzerland-latest.osm.pbf
-docker run -t -v "${PWD}:/data" ghcr.io/project-osrm/osrm-backend \
+docker run -t -v "${PWD}/switzerland:/data" ghcr.io/project-osrm/osrm-backend \
   osrm-partition /data/switzerland-latest.osrm
-docker run -t -v "${PWD}:/data" ghcr.io/project-osrm/osrm-backend \
+docker run -t -v "${PWD}/switzerland:/data" ghcr.io/project-osrm/osrm-backend \
   osrm-customize /data/switzerland-latest.osrm
 
 # 3. Run the routing server
-docker run -d -p 5000:5000 -v "${PWD}:/data" ghcr.io/project-osrm/osrm-backend \
+docker run -d -p 5000:5000 -v "${PWD}/switzerland:/data" ghcr.io/project-osrm/osrm-backend \
   osrm-routed --algorithm mld /data/switzerland-latest.osrm
 ```
 
