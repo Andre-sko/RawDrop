@@ -1,0 +1,2441 @@
+<!--
+  Route Tracker Híbrido
+  Copyright (c) 2026 André Soares. All rights reserved.
+  See LICENSE at the project root.
+-->
+<!DOCTYPE html>
+<html lang="pt-PT">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Route Tracker Híbrido</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/css/styles.css">
+<script>
+  // Runs before anything renders, on purpose: reading the saved theme
+  // later (down with the rest of the JS at the end of <body>) would let
+  // the page paint in the default dark theme first and then snap to
+  // light — a visible flash on every single load.
+  (function(){
+    try{
+      var saved = localStorage.getItem('route-tracker-theme');
+      if(saved === 'light' || saved === 'dark'){
+        document.documentElement.setAttribute('data-theme', saved);
+      }
+      // 'auto' (or nothing saved) deliberately sets no attribute, which
+      // leaves the prefers-color-scheme media query in charge.
+    } catch(e){ /* localStorage bloqueado — fica no tema por omissão */ }
+  })();
+</script>
+</head>
+<body>
+
+<header>
+  <div class="header-text">
+    <div class="eyebrow"><span data-i18n="eyebrow">Ferramenta de rota</span> &mdash; André</div>
+    <h1 class="display" data-i18n="appTitle">Route Tracker Híbrido</h1>
+    <p data-i18n="appDescription">Insere os endereços na ordem de visita, calcula distância e tempo entre paragens, e obtém a hora de chegada a partir de uma hora de início e uma pausa. Endereços que a API não reconheça podem ser corrigidos com um alias de coordenadas GPS. A chave da API fica guardada no servidor, nunca no browser.</p>
+  </div>
+  <div class="header-controls">
+    <button id="themeToggle" class="theme-toggle" data-i18n-title="themeToggleTitle" title="Tema claro/escuro"></button>
+    <select id="langSelect" class="lang-select" title="Language / Idioma / Langue / Sprache / Lingua">
+    <option value="pt">🇵🇹 Português</option>
+    <option value="en">🇬🇧 English</option>
+    <option value="fr">🇫🇷 Français</option>
+    <option value="de">🇩🇪 Deutsch</option>
+    <option value="it">🇮🇹 Italiano</option>
+  </select>
+  </div>
+</header>
+
+<div class="tab-bar">
+  <button class="tab-btn active" data-tab="route" data-i18n="tabRoute">🗺️ Rota</button>
+  <button class="tab-btn" data-tab="video" data-i18n="tabVideo">🎥 Vídeo → Endereço</button>
+  <button class="tab-btn" data-tab="verify" data-i18n="tabVerify">✓ Corrigir Endereços</button>
+</div>
+
+<div id="tabPanelRoute" class="tab-panel active">
+<div class="layout">
+
+  <!-- SIDEBAR -->
+  <div class="sidebar">
+
+    <div>
+      <div class="block-label"><span class="num">01</span> <span data-i18n="startEndLabel">Ponto de partida e chegada</span></div>
+      <label class="field-label" for="startEndAddress" data-i18n="startEndSublabel">Opcional — se preenchido, é usado automaticamente como primeira e última paragem (viagem de ida e volta)</label>
+      <input type="text" id="startEndAddress" data-i18n-placeholder="startEndPlaceholder" placeholder="Armazém Central, Riddes" />
+    </div>
+
+    <div>
+      <div class="block-label"><span class="num">02</span> <span data-i18n="section1Label">Endereços</span></div>
+      <label class="field-label" for="addressList" data-i18n="section1Sublabel">Um endereço por linha, na ordem de visita</label>
+      <textarea id="addressList" data-i18n-placeholder="addressPlaceholder" placeholder="Rua Augusta 1, Lisboa
+Praça do Comércio, Lisboa
+Torre de Belém, Lisboa"></textarea>
+      <div class="hint" data-i18n="deadlineHint">Precisas de estar num endereço até uma certa hora? Acrescenta <span class="mono">| HH:MM</span> no fim dessa linha (ex: "Rua X, Cidade | 12:00").</div>
+      <div class="hint" data-i18n="fileHint">Também podes carregar um ficheiro .txt/.csv:</div>
+      <input type="file" id="fileInput" accept=".txt,.csv" style="margin-top:6px; margin-bottom:10px; font-size:12px;" />
+      <div style="display:flex; gap:8px; margin-bottom:8px;">
+        <button class="btn-ghost" id="clearAddressesBtn" style="flex:1; font-size:12px;" data-i18n="clearAddressesBtn">🗑 Limpar</button>
+        <button class="btn-ghost" id="sendToVerifyBtn" style="flex:1; font-size:12px;" data-i18n="sendToVerifyBtn">↗ Corrigir Endereços</button>
+      </div>
+      <div style="display:flex; gap:8px;">
+        <select id="addressExportFormat" style="flex:0 0 auto;">
+          <option value="csv">CSV</option>
+          <option value="txt">TXT</option>
+          <option value="json">JSON</option>
+        </select>
+        <button class="btn-ghost" id="exportAddressesBtn" style="flex:1; font-size:12px;" data-i18n="exportAddressesBtn">⬇ Exportar endereços</button>
+        <button class="btn-share-qr" id="exportAddressesQrBtn" data-i18n-title="qrShareBtnTitle" title="Partilhar por QR code">📱</button>
+      </div>
+    </div>
+
+    <div>
+      <div class="block-label"><span class="num">03</span> <span data-i18n="section2Label">Aliases de coordenadas</span></div>
+      <div class="hint" id="section2Hint" style="margin-top:0; margin-bottom:10px;">Se um endereço não for reconhecido, define aqui o texto exato tal como aparece na lista, e a coordenada GPS a usar em vez dele (formato: <span class="mono">latitude,longitude</span>). Ficam guardados no servidor, sobrevivem a recarregar a página.</div>
+      <label class="field-label" for="aliasPicker" data-i18n="aliasPickerLabel">Escolher endereço da lista (evita erros de digitação)</label>
+      <select id="aliasPicker" style="width:100%; background:var(--panel); border:1px solid var(--border); border-radius:8px; color:var(--text); padding:8px 10px; font-size:12.5px; margin-bottom:10px;">
+        <option value="" data-i18n="aliasPickerDefault">-- escolher da lista de endereços --</option>
+      </select>
+      <div class="alias-row">
+        <input type="text" id="aliasFrom" data-i18n-placeholder="aliasFromPlaceholder" placeholder="texto do endereço" />
+        <input type="text" id="aliasTo" data-i18n-placeholder="aliasToPlaceholder" placeholder="38.7223,-9.1393 ou Rua Nova, Cidade" />
+        <button class="btn-ghost" id="addAliasBtn">+</button>
+      </div>
+      <div class="list-search-row">
+        <input type="text" id="aliasSearch" data-i18n-placeholder="searchPlaceholder" placeholder="Pesquisar…" />
+        <span class="list-count" id="aliasCount"></span>
+      </div>
+      <div id="aliasList" class="scroll-list"></div>
+    </div>
+
+    <div>
+      <div class="block-label"><span class="num">04</span> <span data-i18n="section4Label">Endereços interditos</span></div>
+      <div class="hint" id="section4Hint" style="margin-top:0; margin-bottom:10px;">Endereços onde a entrega é feita a pé (rua estreita, telhado, terra batida, acesso interdito à carrinha). Ficam guardados no servidor, e os troços que os envolvem são calculados automaticamente a pé em vez de de carro.</div>
+      <label class="field-label" for="blockedPicker" data-i18n="blockedPickerLabel">Escolher endereço da lista</label>
+      <select id="blockedPicker" style="width:100%; background:var(--panel); border:1px solid var(--border); border-radius:8px; color:var(--text); padding:8px 10px; font-size:12.5px; margin-bottom:10px;">
+        <option value="" data-i18n="aliasPickerDefault">-- escolher da lista de endereços --</option>
+      </select>
+      <div class="alias-row">
+        <input type="text" id="blockedAddress" data-i18n-placeholder="blockedAddressPlaceholder" placeholder="texto do endereço" />
+        <input type="text" id="blockedReason" data-i18n-placeholder="blockedReasonPlaceholder" placeholder="motivo (opcional)" />
+        <button class="btn-ghost" id="addBlockedBtn">+</button>
+      </div>
+      <label class="field-label" for="blockedParking" data-i18n="blockedParkingLabel" style="margin-top:2px;">Ponto de estacionamento (opcional)</label>
+      <input type="text" id="blockedParking" data-i18n-placeholder="blockedParkingPlaceholder" placeholder="46.1706,7.4453 ou Rua do Parque, Cidade" style="margin-bottom:10px;" />
+      <div class="hint" data-i18n="blockedParkingHint" style="margin-top:-4px; margin-bottom:10px;">Se souberes onde a carrinha consegue estacionar perto deste endereço, o troço divide-se automaticamente em carro até lá + a pé até à porta. Sem isto, o troço inteiro é calculado a pé.</div>
+      <div class="list-search-row">
+        <input type="text" id="blockedSearch" data-i18n-placeholder="searchPlaceholder" placeholder="Pesquisar…" />
+        <span class="list-count" id="blockedCount"></span>
+      </div>
+      <div id="blockedList" class="scroll-list"></div>
+    </div>
+
+    <div>
+      <div class="block-label"><span class="num">05</span> <span data-i18n="deliveryTimesLabel">Horas de entrega</span></div>
+      <div class="hint" id="deliveryTimesHint" style="margin-top:0; margin-bottom:10px;">Para clientes habituais com uma hora limite fixa, define aqui o endereço e a hora (ex: até às 10:00). Fica guardado no servidor e aplica-se sempre que esse endereço aparecer numa rota — sem teres de escrever "| HH:MM" na lista todas as vezes. Uma hora escrita diretamente na lista de endereços (secção 02) tem sempre prioridade sobre isto.</div>
+      <label class="field-label" for="deliveryTimePicker" data-i18n="deliveryTimePickerLabel">Escolher endereço da lista</label>
+      <select id="deliveryTimePicker" style="width:100%; background:var(--panel); border:1px solid var(--border); border-radius:8px; color:var(--text); padding:8px 10px; font-size:12.5px; margin-bottom:10px;">
+        <option value="" data-i18n="aliasPickerDefault">-- escolher da lista de endereços --</option>
+      </select>
+      <div class="alias-row">
+        <input type="text" id="deliveryTimeAddress" data-i18n-placeholder="aliasFromPlaceholder" placeholder="texto do endereço" />
+        <input type="time" id="deliveryTimeValue" />
+        <button class="btn-ghost" id="addDeliveryTimeBtn">+</button>
+      </div>
+      <div class="list-search-row">
+        <input type="text" id="deliveryTimeSearch" data-i18n-placeholder="searchPlaceholder" placeholder="Pesquisar…" />
+        <span class="list-count" id="deliveryTimeCount"></span>
+      </div>
+      <div id="deliveryTimeList" class="scroll-list"></div>
+    </div>
+
+    <div>
+      <div class="block-label"><span class="num">06</span> <span data-i18n="section3Label">Horário</span></div>
+      <div class="row2">
+        <div>
+          <label class="field-label" for="startTime" data-i18n="startTimeLabel">Hora de início</label>
+          <input type="time" id="startTime" />
+        </div>
+        <div>
+          <label class="field-label" for="breakMinutes" data-i18n="breakMinutesLabel">Pausa (min)</label>
+          <input type="number" id="breakMinutes" min="0" step="5" value="0" />
+        </div>
+      </div>
+      <div style="margin-top:10px;">
+        <label class="field-label" for="stopMinutes" data-i18n="stopMinutesLabel">Tempo por paragem (min)</label>
+        <input type="number" id="stopMinutes" min="0" step="1" value="0" />
+        <div class="hint" data-i18n="stopMinutesHint">Tempo gasto em cada endereço (ex: entrega, descarga). Aplicado a todas as paragens exceto a primeira (ponto de partida).</div>
+      </div>
+    </div>
+
+    <button class="btn-primary" id="calcBtn" data-i18n="calcBtnText">Calcular rota</button>
+    <div id="statusArea"></div>
+
+    <div style="margin-top:26px;">
+      <div class="block-label"><span class="num">07</span> <span data-i18n="cacheLabel">Dados guardados</span></div>
+      <div class="hint" id="cacheHint" style="margin-top:0; margin-bottom:10px;">As distâncias já calculadas ficam guardadas para não pagares duas vezes pelo mesmo troço. Se souberes que uma estrada mudou (obras que acabaram, sentido alterado), limpa aqui para forçar valores novos.</div>
+      <div id="cacheStatsArea" class="cache-stats"></div>
+      <button class="btn-ghost" id="clearDistanceCacheBtn" style="width:100%; font-size:12px; margin-top:8px;" data-i18n="clearDistanceCacheBtn">🗑 Limpar distâncias guardadas</button>
+      <div id="cacheStatusArea"></div>
+    </div>
+  </div>
+
+  <!-- MAIN -->
+  <div class="main">
+    <div class="block-label" style="margin-bottom:16px;"><span class="num">→</span> <span data-i18n="mainLabel">Trajeto</span></div>
+    <div id="manifestArea">
+      <div class="empty-state" data-i18n="emptyState">Preenche os endereços, depois clica em "Calcular rota".</div>
+    </div>
+  </div>
+
+</div>
+</div>
+
+<div id="tabPanelVideo" class="tab-panel">
+  <div class="video-tool">
+    <div class="video-tool-intro">
+      <h2 class="display" data-i18n="videoToolTitle">Vídeo → Endereço</h2>
+      <p data-i18n="videoToolDescription">Carrega um vídeo ou uma foto (ex: filmagem de etiquetas de encomendas) e a ferramenta procura endereços no texto visível, confirmando cada um junto do Google Maps.</p>
+    </div>
+
+    <div class="video-upload-row">
+      <label class="file-drop" for="videoFileInput" id="videoFileDrop">
+        <input type="file" id="videoFileInput" accept="video/*,image/*" style="display:none;" />
+        <span class="file-drop-icon">🎥</span>
+        <span class="file-drop-text" id="videoFileText" data-i18n="videoDropText">Clica para escolher um vídeo ou foto, ou arrasta o ficheiro para aqui</span>
+      </label>
+    </div>
+
+    <div class="row2" style="margin-bottom:16px;">
+      <div>
+        <label class="field-label" for="engineSelect" data-i18n="engineSelectLabel">Motor de leitura</label>
+        <select id="engineSelect">
+          <option value="local" data-i18n="engineOptionLocal">Local (offline) — sem internet</option>
+          <option value="ai" data-i18n="engineOptionAI">IA (Claude) — mais preciso, precisa de internet</option>
+        </select>
+      </div>
+      <div>
+        <label class="field-label" for="fpsSelect" data-i18n="fpsSelectLabel">Frames por segundo (vídeo)</label>
+        <select id="fpsSelect">
+          <option value="1" data-i18n="fpsOption1">1 fps (mais rápido)</option>
+          <option value="2" selected data-i18n="fpsOption2">2 fps (recomendado)</option>
+          <option value="3" data-i18n="fpsOption3">3 fps (scroll rápido)</option>
+        </select>
+      </div>
+    </div>
+
+    <button class="btn-primary" id="extractBtn" data-i18n="extractBtnText" disabled>Extrair endereços</button>
+    <div id="videoProgressWrap" style="display:none; margin-top:12px;">
+      <div class="progress-track">
+        <div id="videoProgressBar" class="progress-fill"></div>
+      </div>
+      <div id="videoProgressLabel" class="progress-label"></div>
+    </div>
+    <div id="videoStatusArea"></div>
+
+    <div id="videoResultsArea"></div>
+  </div>
+</div>
+
+<div id="tabPanelVerify" class="tab-panel">
+  <div class="video-tool">
+    <div class="video-tool-intro">
+      <h2 class="display" data-i18n="verifyToolTitle">Corrigir Endereços</h2>
+      <p data-i18n="verifyToolDescription">Cola ou carrega uma lista de endereços (um por linha) e compara-os com a Google. Escolhe quais correções aceitar, todas, ou nenhuma.</p>
+    </div>
+
+    <label class="field-label" for="verifyTextarea" data-i18n="verifySublabel">Um endereço por linha</label>
+    <textarea id="verifyTextarea" data-i18n-placeholder="addressPlaceholder" placeholder="Rua Augusta 1, Lisboa
+Praça do Comércio, Lisboa
+Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
+    <div class="hint" data-i18n="fileHint">Também podes carregar um ficheiro .txt/.csv:</div>
+    <input type="file" id="verifyFileInput" accept=".txt,.csv" style="margin-top:6px; margin-bottom:10px; font-size:12px;" />
+    <button class="btn-ghost" id="clearVerifyBtn" style="width:100%; margin-bottom:14px; font-size:12px;" data-i18n="clearVerifyBtn">🗑 Limpar lista</button>
+
+    <button class="btn-primary" id="verifyBtn" data-i18n="verifyBtnText">Verificar endereços</button>
+    <div id="verifyStatusArea"></div>
+
+    <div id="verifyResultsArea"></div>
+  </div>
+</div>
+
+<footer class="app-footer">
+  <p data-i18n="footerDisclaimer">Criado por André Soares com a ajuda de Claude (Anthropic). Pode conter erros. Verifica sempre a informação antes de a usares. Dados de mapas e cálculos de rota © Google.</p>
+</footer>
+
+<div class="qr-modal-overlay" id="qrModalOverlay">
+  <div class="qr-modal">
+    <button class="qr-modal-close" id="qrModalClose" title="Fechar">✕</button>
+    <h3 data-i18n="qrModalTitle">Digitaliza noutro dispositivo</h3>
+    <img class="qr-modal-image" id="qrModalImage" alt="QR code" />
+    <div id="qrModalNote"></div>
+    <div class="qr-modal-url" id="qrModalUrl"></div>
+    <button class="btn-ghost" id="qrModalCopyBtn" data-i18n="qrModalCopyBtn" style="width:100%;">Copiar link</button>
+    <div class="qr-modal-expiry" id="qrModalExpiry"></div>
+  </div>
+</div>
+
+<script src="/js/translations.js"></script>
+<script>
+(async function(){
+  const LANG_STORAGE_KEY = 'route-tracker-lang';
+  const SUPPORTED_LANGS = Object.keys(TRANSLATIONS);
+
+  function detectInitialLang(){
+    try{
+      const saved = localStorage.getItem(LANG_STORAGE_KEY);
+      if(saved && SUPPORTED_LANGS.includes(saved)) return saved;
+    } catch(e){ /* ignora */ }
+    const browserLang = (navigator.language || 'pt').slice(0,2).toLowerCase();
+    return SUPPORTED_LANGS.includes(browserLang) ? browserLang : 'pt';
+  }
+
+  let currentLang = detectInitialLang();
+
+  function t(key, vars){
+    let str = (TRANSLATIONS[currentLang] && TRANSLATIONS[currentLang][key])
+      || TRANSLATIONS.pt[key]
+      || key;
+    if(vars){
+      Object.keys(vars).forEach(k=>{
+        str = str.replace(new RegExp('\\{' + k + '\\}', 'g'), vars[k]);
+      });
+    }
+    return str;
+  }
+
+  function applyStaticTranslations(){
+    document.documentElement.lang = TRANSLATIONS[currentLang].htmlLang;
+    document.querySelectorAll('[data-i18n]').forEach(el=>{
+      el.textContent = t(el.getAttribute('data-i18n'));
+    });
+    document.querySelectorAll('[data-i18n-placeholder]').forEach(el=>{
+      el.placeholder = t(el.getAttribute('data-i18n-placeholder'));
+    });
+    document.querySelectorAll('[data-i18n-title]').forEach(el=>{
+      el.title = t(el.getAttribute('data-i18n-title'));
+    });
+    $('section2Hint').innerHTML = t('section2Hint');
+    $('section4Hint').innerHTML = t('section4Hint');
+    $('deliveryTimesHint').innerHTML = t('deliveryTimesHint');
+    $('cacheHint').innerHTML = t('cacheHint');
+    document.title = t('appTitle');
+  }
+
+  const aliases = []; // {from, to: "lat,lng"}
+  let lastRouteData = null; // data from the last calculated route, used for export
+
+  const $ = (id) => document.getElementById(id);
+
+  async function fetchAliases(){
+    try{
+      const res = await fetch('/api/aliases');
+      const list = await res.json();
+      aliases.length = 0;
+      if(Array.isArray(list)) list.forEach(a=>{
+        if(a && typeof a.from === 'string' && typeof a.to === 'string') aliases.push(a);
+      });
+    } catch(e){ /* servidor indisponível de momento */ }
+  }
+
+  async function saveAliasToServer(from, to){
+    const res = await fetch('/api/aliases', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ from, to }),
+    });
+    const data = await res.json();
+    if(!res.ok) throw new Error(data.error || 'Falha ao guardar alias');
+    return data;
+  }
+
+  async function deleteAliasFromServer(from){
+    const res = await fetch('/api/aliases', {
+      method: 'DELETE',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ from }),
+    });
+    const data = await res.json();
+    if(!res.ok) throw new Error(data.error || 'Falha ao remover alias');
+    return data;
+  }
+
+  // ---------- Aliases ----------
+  let aliasFilterText = '';
+
+  function renderAliases(){
+    const box = $('aliasList');
+    box.innerHTML = '';
+
+    const filtered = aliasFilterText
+      ? aliases.filter(a => normalizeForMatch(a.from).includes(aliasFilterText) || normalizeForMatch(a.to).includes(aliasFilterText))
+      : aliases;
+
+    $('aliasCount').textContent = aliasFilterText
+      ? `${filtered.length} / ${aliases.length}`
+      : (aliases.length > 0 ? `${aliases.length}` : '');
+
+    if(aliases.length === 0){
+      box.innerHTML = '';
+    } else if(filtered.length === 0){
+      box.innerHTML = `<div class="list-empty">${t('noResults')}</div>`;
+    } else {
+      filtered.forEach((a) => {
+        const idx = aliases.indexOf(a); // real index, to remove correctly even when filtered
+        const row = document.createElement('div');
+        row.className = 'alias-list-item';
+        row.innerHTML = `
+          <div>
+            <div class="from">${escapeHtml(a.from)}</div>
+            <div class="to">→ ${escapeHtml(a.to)}</div>
+          </div>
+          <button class="alias-remove" data-idx="${idx}" title="${t('aliasRemoveTitle')}">✕</button>
+        `;
+        box.appendChild(row);
+      });
+    }
+
+    box.querySelectorAll('.alias-remove').forEach(btn=>{
+      btn.addEventListener('click', async (e)=>{
+        const i = parseInt(e.currentTarget.getAttribute('data-idx'),10);
+        const from = aliases[i].from;
+        try{
+          const updated = await deleteAliasFromServer(from);
+          aliases.length = 0;
+          updated.forEach(a=>aliases.push(a));
+          renderAliases();
+        } catch(err){
+          showStatus(t('aliasRemoveError', {msg: err.message}), 'error');
+        }
+      });
+    });
+  }
+
+  $('aliasSearch').addEventListener('input', (e)=>{
+    aliasFilterText = normalizeForMatch(e.target.value);
+    renderAliases();
+  });
+
+  function escapeHtml(s){
+    return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
+  }
+
+  // ---------- Alias address picker ----------
+  function refreshAliasPicker(){
+    const picker = $('aliasPicker');
+    const current = picker.value;
+    const addrs = $('addressList').value
+      .split(/\r?\n/)
+      .map(l=>l.trim())
+      .filter(l=>l.length>0 && !l.startsWith('#'));
+    picker.innerHTML = `<option value="">${t('aliasPickerDefault')}</option>` +
+      addrs.map(a => `<option value="${escapeHtml(a)}">${escapeHtml(a)}</option>`).join('');
+    if(addrs.includes(current)) picker.value = current;
+  }
+  $('addressList').addEventListener('focus', refreshAliasPicker);
+  $('addressList').addEventListener('input', refreshAliasPicker);
+  $('addressList').addEventListener('focus', refreshBlockedPicker);
+  $('addressList').addEventListener('input', refreshBlockedPicker);
+  $('addressList').addEventListener('focus', refreshDeliveryTimePicker);
+  $('addressList').addEventListener('input', refreshDeliveryTimePicker);
+  $('aliasPicker').addEventListener('focus', refreshAliasPicker);
+  $('aliasPicker').addEventListener('change', (e)=>{
+    if(e.target.value) $('aliasFrom').value = e.target.value;
+  });
+
+  $('addAliasBtn').addEventListener('click', async ()=>{
+    const from = $('aliasFrom').value.trim();
+    const to = $('aliasTo').value.trim();
+    if(!from || !to){ return; }
+    showStatus(`<span class="spinner"></span>${t('aliasChecking')}`, 'info');
+    try{
+      const updated = await saveAliasToServer(from, to);
+      aliases.length = 0;
+      updated.forEach(a=>aliases.push(a));
+      $('aliasFrom').value = '';
+      $('aliasTo').value = '';
+      renderAliases();
+      showStatus(t('aliasSaved'), 'ok');
+    } catch(err){
+      showStatus(t('aliasSaveError', {msg: err.message}), 'error');
+    }
+  });
+
+  const deliveryTimes = []; // {address, deadline: "HH:MM"}
+
+  async function fetchDeliveryTimes(){
+    try{
+      const res = await fetch('/api/delivery-times');
+      const list = await res.json();
+      deliveryTimes.length = 0;
+      if(Array.isArray(list)) list.forEach(d=>{
+        if(d && typeof d.address === 'string' && typeof d.deadline === 'string') deliveryTimes.push(d);
+      });
+    } catch(e){ /* servidor indisponível de momento */ }
+  }
+
+  async function saveDeliveryTimeToServer(address, deadline){
+    const res = await fetch('/api/delivery-times', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ address, deadline }),
+    });
+    const data = await res.json();
+    if(!res.ok) throw new Error(data.error || 'Falha ao guardar hora de entrega');
+    return data;
+  }
+
+  async function deleteDeliveryTimeFromServer(address){
+    const res = await fetch('/api/delivery-times', {
+      method: 'DELETE',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ address }),
+    });
+    const data = await res.json();
+    if(!res.ok) throw new Error(data.error || 'Falha ao remover hora de entrega');
+    return data;
+  }
+
+  // Same exact/approximate matching logic as aliases, applied to the
+  // list of saved delivery deadlines. Returns "HH:MM" or null.
+  function findDeliveryTimeMatch(address){
+    const target = normalizeForMatch(address);
+    const exactHit = deliveryTimes.find(d => normalizeForMatch(d.address) === target);
+    if(exactHit) return exactHit.deadline;
+
+    let best = null, bestScore = 0;
+    deliveryTimes.forEach(d=>{
+      const score = tokenSimilarity(d.address, address);
+      if(score > bestScore){ bestScore = score; best = d; }
+    });
+    return (best && bestScore >= FUZZY_THRESHOLD) ? best.deadline : null;
+  }
+
+  const blocked = []; // {address, reason}
+
+  async function fetchBlocked(){
+    try{
+      const res = await fetch('/api/blocked');
+      const list = await res.json();
+      blocked.length = 0;
+      if(Array.isArray(list)) list.forEach(b=>{
+        if(b && typeof b.address === 'string') blocked.push(b);
+      });
+    } catch(e){ /* servidor indisponível de momento */ }
+  }
+
+  async function saveBlockedToServer(address, reason, parkingPoint){
+    const res = await fetch('/api/blocked', {
+      method: 'POST',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ address, reason, parkingPoint }),
+    });
+    const data = await res.json();
+    if(!res.ok) throw new Error(data.error || 'Falha ao guardar endereço interdito');
+    return data;
+  }
+
+  async function deleteBlockedFromServer(address){
+    const res = await fetch('/api/blocked', {
+      method: 'DELETE',
+      headers: {'Content-Type': 'application/json'},
+      body: JSON.stringify({ address }),
+    });
+    const data = await res.json();
+    if(!res.ok) throw new Error(data.error || 'Falha ao remover endereço interdito');
+    return data;
+  }
+
+  // ---------- Blocked addresses ----------
+  let blockedFilterText = '';
+
+  function renderBlocked(){
+    const box = $('blockedList');
+    box.innerHTML = '';
+
+    const filtered = blockedFilterText
+      ? blocked.filter(b =>
+          normalizeForMatch(b.address).includes(blockedFilterText) ||
+          normalizeForMatch(b.reason || '').includes(blockedFilterText)
+        )
+      : blocked;
+
+    $('blockedCount').textContent = blockedFilterText
+      ? `${filtered.length} / ${blocked.length}`
+      : (blocked.length > 0 ? `${blocked.length}` : '');
+
+    if(blocked.length === 0){
+      box.innerHTML = '';
+    } else if(filtered.length === 0){
+      box.innerHTML = `<div class="list-empty">${t('noResults')}</div>`;
+    } else {
+      filtered.forEach((b) => {
+        const idx = blocked.indexOf(b); // real index, to remove correctly even when filtered
+        const row = document.createElement('div');
+        row.className = 'alias-list-item';
+        row.innerHTML = `
+          <div>
+            <div class="from">🚫 ${escapeHtml(b.address)}</div>
+            ${b.reason ? `<div class="to">${escapeHtml(b.reason)}</div>` : ''}
+            ${b.parkingPoint ? `<div class="to">🅿️ ${escapeHtml(b.parkingPoint)}</div>` : ''}
+          </div>
+          <button class="alias-remove" data-idx="${idx}" title="${t('aliasRemoveTitle')}">✕</button>
+        `;
+        box.appendChild(row);
+      });
+    }
+
+    box.querySelectorAll('.alias-remove').forEach(btn=>{
+      btn.addEventListener('click', async (e)=>{
+        const i = parseInt(e.currentTarget.getAttribute('data-idx'),10);
+        const address = blocked[i].address;
+        try{
+          const updated = await deleteBlockedFromServer(address);
+          blocked.length = 0;
+          updated.forEach(b=>blocked.push(b));
+          renderBlocked();
+        } catch(err){
+          showStatus(t('blockedRemoveError', {msg: err.message}), 'error');
+        }
+      });
+    });
+  }
+
+  $('blockedSearch').addEventListener('input', (e)=>{
+    blockedFilterText = normalizeForMatch(e.target.value);
+    renderBlocked();
+  });
+
+  function refreshBlockedPicker(){
+    const picker = $('blockedPicker');
+    const current = picker.value;
+    const addrs = $('addressList').value
+      .split(/\r?\n/)
+      .map(l=>l.trim())
+      .filter(l=>l.length>0 && !l.startsWith('#'));
+    picker.innerHTML = `<option value="">${t('aliasPickerDefault')}</option>` +
+      addrs.map(a => `<option value="${escapeHtml(a)}">${escapeHtml(a)}</option>`).join('');
+    if(addrs.includes(current)) picker.value = current;
+  }
+  $('blockedPicker').addEventListener('focus', refreshBlockedPicker);
+  $('blockedPicker').addEventListener('change', (e)=>{
+    if(e.target.value) $('blockedAddress').value = e.target.value;
+  });
+
+  $('addBlockedBtn').addEventListener('click', async ()=>{
+    const address = $('blockedAddress').value.trim();
+    const reason = $('blockedReason').value.trim();
+    const parkingPoint = $('blockedParking').value.trim();
+    if(!address){ return; }
+    showStatus(`<span class="spinner"></span>${t('aliasChecking')}`, 'info');
+    try{
+      const updated = await saveBlockedToServer(address, reason, parkingPoint);
+      blocked.length = 0;
+      updated.forEach(b=>blocked.push(b));
+      $('blockedAddress').value = '';
+      $('blockedReason').value = '';
+      $('blockedParking').value = '';
+      renderBlocked();
+      showStatus(t('blockedSaved'), 'ok');
+    } catch(err){
+      showStatus(t('blockedSaveError', {msg: err.message}), 'error');
+    }
+  });
+
+  // ---------- Delivery deadlines ----------
+  let deliveryTimeFilterText = '';
+
+  function renderDeliveryTimes(){
+    const box = $('deliveryTimeList');
+    box.innerHTML = '';
+
+    const filtered = deliveryTimeFilterText
+      ? deliveryTimes.filter(d =>
+          normalizeForMatch(d.address).includes(deliveryTimeFilterText) ||
+          normalizeForMatch(d.deadline).includes(deliveryTimeFilterText)
+        )
+      : deliveryTimes;
+
+    $('deliveryTimeCount').textContent = deliveryTimeFilterText
+      ? `${filtered.length} / ${deliveryTimes.length}`
+      : (deliveryTimes.length > 0 ? `${deliveryTimes.length}` : '');
+
+    if(deliveryTimes.length === 0){
+      box.innerHTML = '';
+    } else if(filtered.length === 0){
+      box.innerHTML = `<div class="list-empty">${t('noResults')}</div>`;
+    } else {
+      filtered.forEach((d) => {
+        const idx = deliveryTimes.indexOf(d); // real index, to remove correctly even when filtered
+        const row = document.createElement('div');
+        row.className = 'alias-list-item';
+        row.innerHTML = `
+          <div>
+            <div class="from">${escapeHtml(d.address)}</div>
+            <div class="to">🎯 ${escapeHtml(d.deadline)}</div>
+          </div>
+          <button class="alias-remove" data-idx="${idx}" title="${t('aliasRemoveTitle')}">✕</button>
+        `;
+        box.appendChild(row);
+      });
+    }
+
+    box.querySelectorAll('.alias-remove').forEach(btn=>{
+      btn.addEventListener('click', async (e)=>{
+        const i = parseInt(e.currentTarget.getAttribute('data-idx'),10);
+        const address = deliveryTimes[i].address;
+        try{
+          const updated = await deleteDeliveryTimeFromServer(address);
+          deliveryTimes.length = 0;
+          updated.forEach(d=>deliveryTimes.push(d));
+          renderDeliveryTimes();
+        } catch(err){
+          showStatus(t('deliveryTimeRemoveError', {msg: err.message}), 'error');
+        }
+      });
+    });
+  }
+
+  $('deliveryTimeSearch').addEventListener('input', (e)=>{
+    deliveryTimeFilterText = normalizeForMatch(e.target.value);
+    renderDeliveryTimes();
+  });
+
+  function refreshDeliveryTimePicker(){
+    const picker = $('deliveryTimePicker');
+    const current = picker.value;
+    const addrs = $('addressList').value
+      .split(/\r?\n/)
+      .map(l=>l.trim())
+      .filter(l=>l.length>0 && !l.startsWith('#'));
+    picker.innerHTML = `<option value="">${t('aliasPickerDefault')}</option>` +
+      addrs.map(a => `<option value="${escapeHtml(a)}">${escapeHtml(a)}</option>`).join('');
+    if(addrs.includes(current)) picker.value = current;
+  }
+  $('deliveryTimePicker').addEventListener('focus', refreshDeliveryTimePicker);
+  $('deliveryTimePicker').addEventListener('change', (e)=>{
+    if(e.target.value) $('deliveryTimeAddress').value = e.target.value;
+  });
+
+  $('addDeliveryTimeBtn').addEventListener('click', async ()=>{
+    const address = $('deliveryTimeAddress').value.trim();
+    const deadline = $('deliveryTimeValue').value.trim();
+    if(!address || !deadline){ return; }
+    showStatus(`<span class="spinner"></span>${t('aliasChecking')}`, 'info');
+    try{
+      const updated = await saveDeliveryTimeToServer(address, deadline);
+      deliveryTimes.length = 0;
+      updated.forEach(d=>deliveryTimes.push(d));
+      $('deliveryTimeAddress').value = '';
+      $('deliveryTimeValue').value = '';
+      renderDeliveryTimes();
+      showStatus(t('deliveryTimeSaved'), 'ok');
+    } catch(err){
+      showStatus(t('deliveryTimeSaveError', {msg: err.message}), 'error');
+    }
+  });
+
+  // ---------- File upload ----------
+  $('fileInput').addEventListener('change', (e)=>{
+    const file = e.target.files[0];
+    if(!file) return;
+    const reader = new FileReader();
+    reader.onload = (evt)=>{
+      $('addressList').value = evt.target.result;
+    };
+    reader.readAsText(file);
+  });
+
+  $('clearAddressesBtn').addEventListener('click', ()=>{
+    $('addressList').value = '';
+    refreshAliasPicker();
+    refreshBlockedPicker();
+    $('fileInput').value = '';
+    clearStatus();
+    $('manifestArea').innerHTML = `<div class="empty-state" data-i18n="emptyState">${t('emptyState')}</div>`;
+    lastRouteData = null;
+  });
+
+  // Appends new address lines to whatever is already in the "Fix
+  // Addresses" textarea, instead of overwriting it — so sending
+  // addresses from the Route tab or from Video → Address doesn't wipe
+  // out a list that's already there.
+  function appendToVerifyTextarea(text){
+    const existing = $('verifyTextarea').value.trim();
+    const incoming = text.trim();
+    if(!incoming) return;
+    $('verifyTextarea').value = existing ? existing + '\n' + incoming : incoming;
+  }
+
+  $('sendToVerifyBtn').addEventListener('click', ()=>{
+    appendToVerifyTextarea($('addressList').value);
+    switchToTab('verify');
+  });
+
+  // Exports just the raw address list (no distances/times/totals) in
+  // whichever format is picked in the dropdown next to it. Content is
+  // just the addresses, nothing else — the export timestamp only shows
+  // up in the filename here, not inside the file (unlike the full
+  // route export, which includes it in the summary).
+  function buildAddressesExportContent(addresses, format){
+    const stamp = timestampForFilename();
+    if(format === 'json'){
+      return { filename: `addresses_${stamp}.json`, content: JSON.stringify(addresses, null, 2), mime: 'application/json' };
+    }
+    if(format === 'csv'){
+      const lines = [csvEscape(t('section1Label')), ...addresses.map(csvEscape)];
+      return { filename: `addresses_${stamp}.csv`, content: '\uFEFF' + lines.join('\r\n'), mime: 'text/csv' };
+    }
+    return { filename: `addresses_${stamp}.txt`, content: addresses.join('\n'), mime: 'text/plain' };
+  }
+
+  function getAddressesForExport(){
+    return $('addressList').value
+      .split(/\r?\n/)
+      .map(l=>l.trim())
+      .filter(l=>l.length>0 && !l.startsWith('#'));
+  }
+
+  $('exportAddressesBtn').addEventListener('click', async ()=>{
+    const addresses = getAddressesForExport();
+    if(addresses.length === 0){
+      showStatus(t('exportAddressesEmpty'), 'error');
+      return;
+    }
+    const { filename, content, mime } = buildAddressesExportContent(addresses, $('addressExportFormat').value);
+    const result = await downloadFile(filename, content, mime);
+    if(result.status === 'fallback'){
+      showStatus(fallbackNoticeFor(result.reason), 'info');
+    }
+  });
+
+  $('exportAddressesQrBtn').addEventListener('click', async ()=>{
+    const addresses = getAddressesForExport();
+    if(addresses.length === 0){
+      showStatus(t('exportAddressesEmpty'), 'error');
+      return;
+    }
+    await shareAddressesViaQr(addresses);
+  });
+
+  // ---------- Status ----------
+  function showStatus(msg, type){
+    const area = $('statusArea');
+    area.innerHTML = `<div class="status-banner ${type}">${msg}</div>`;
+  }
+  function clearStatus(){ $('statusArea').innerHTML = ''; }
+
+  // ---------- Cached data (section 07) ----------
+  // Shows how much is stored and, more usefully, how old the oldest
+  // entry is — that's the one most likely to be out of date if a road
+  // changed since it was cached.
+  function formatCacheAge(days){
+    if(days === null || days === undefined) return '—';
+    if(days === 0) return t('cacheAgeToday');
+    if(days === 1) return t('cacheAgeOneDay');
+    return t('cacheAgeDays', {days});
+  }
+
+  async function refreshCacheStats(){
+    const area = $('cacheStatsArea');
+    try{
+      const res = await fetch('/api/cache-stats');
+      if(!res.ok) throw new Error('falhou');
+      const data = await res.json();
+      const d = data.distance || {};
+      const g = data.geocode || {};
+      // Flag the oldest distance entry once it's past half its lifetime
+      // — old enough to be worth a look, without crying wolf constantly.
+      const warn = d.oldestAgeDays !== null && d.ttlDays && d.oldestAgeDays > (d.ttlDays / 2);
+      area.innerHTML = `
+        <div class="cache-row">
+          <span>${t('cacheDistancesLabel')}</span>
+          <span class="cache-value">${d.entries ?? 0}</span>
+        </div>
+        <div class="cache-row">
+          <span>${t('cacheOldestLabel')}</span>
+          <span class="cache-value ${warn ? 'cache-age-warn' : ''}">${formatCacheAge(d.oldestAgeDays)}</span>
+        </div>
+        <div class="cache-row">
+          <span>${t('cacheAddressesLabel')}</span>
+          <span class="cache-value">${g.entries ?? 0}</span>
+        </div>
+      `;
+    } catch(err){
+      area.innerHTML = `<div class="cache-row"><span>${t('cacheStatsError')}</span></div>`;
+    }
+  }
+
+  $('clearDistanceCacheBtn').addEventListener('click', async ()=>{
+    const btn = $('clearDistanceCacheBtn');
+    const original = btn.textContent;
+    btn.disabled = true;
+    try{
+      const res = await fetch('/api/cache', {
+        method: 'DELETE',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ type: 'distance' }),
+      });
+      if(!res.ok) throw new Error('falhou');
+      $('cacheStatusArea').innerHTML = `<div class="status-banner ok">${t('cacheDistancesCleared')}</div>`;
+      await refreshCacheStats();
+    } catch(err){
+      $('cacheStatusArea').innerHTML = `<div class="status-banner error">${t('cacheClearError')}</div>`;
+    } finally {
+      btn.disabled = false;
+      btn.textContent = original;
+    }
+  });
+
+
+  // ---------- Helpers ----------
+  function normalizeForMatch(s){
+    return s
+      .trim()
+      .toLowerCase()
+      .replace(/[’‘`]/g, "'")   // normalize apostrophes
+      .replace(/\s+/g, ' ');    // collapse multiple spaces
+  }
+
+  function stripAccents(s){
+    return s.normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+  }
+
+  // Extracts meaningful "tokens" (words and numbers) ignoring punctuation,
+  // accents, and case — used to recognize the same address even if it's
+  // not written exactly the same way.
+  function coreTokens(s){
+    return stripAccents(s.toLowerCase()).match(/[a-z0-9]+/g) || [];
+  }
+
+  function tokenSimilarity(a, b){
+    const ta = coreTokens(a);
+    const tb = coreTokens(b);
+    if(ta.length === 0 || tb.length === 0) return 0;
+    const setA = new Set(ta);
+    const setB = new Set(tb);
+    let intersection = 0;
+    setA.forEach(t => { if(setB.has(t)) intersection++; });
+    const union = new Set([...setA, ...setB]).size;
+    return intersection / union; // Jaccard: 1 = identical, 0 = nothing in common
+  }
+
+  const FUZZY_THRESHOLD = 0.75;
+
+  // Returns { to, exact } if a matching alias is found, or null.
+  // 1st attempt: exact match (ignoring spaces/apostrophes/case).
+  // 2nd attempt: approximate match by word/number similarity (token
+  //   regex), in case the address isn't written exactly the same way
+  //   as last time.
+  function resolveAlias(address){
+    const target = normalizeForMatch(address);
+    const exactHit = aliases.find(a => normalizeForMatch(a.from) === target);
+    if(exactHit) return { to: exactHit.to, exact: true };
+
+    let best = null, bestScore = 0;
+    aliases.forEach(a=>{
+      const score = tokenSimilarity(a.from, address);
+      if(score > bestScore){ bestScore = score; best = a; }
+    });
+    if(best && bestScore >= FUZZY_THRESHOLD) return { to: best.to, exact: false };
+    return null;
+  }
+
+  // Same exact/approximate matching logic as aliases, applied to the
+  // list of addresses blocked for the van.
+  function findBlockedMatch(address){
+    const target = normalizeForMatch(address);
+    const exactHit = blocked.find(b => normalizeForMatch(b.address) === target);
+    if(exactHit) return exactHit;
+
+    let best = null, bestScore = 0;
+    blocked.forEach(b=>{
+      const score = tokenSimilarity(b.address, address);
+      if(score > bestScore){ bestScore = score; best = b; }
+    });
+    return (best && bestScore >= FUZZY_THRESHOLD) ? best : null;
+  }
+
+  function formatMinutes(totalMinutes){
+    const h = Math.floor(totalMinutes/60);
+    const m = Math.round(totalMinutes%60);
+    if(h===0) return `${m} min`;
+    return `${h}h ${String(m).padStart(2,'0')}min`;
+  }
+
+  function formatKmShort(meters){
+    return `${(meters/1000).toFixed(1)} km`;
+  }
+
+  function computeEndTime(startStr, totalMinutes){
+    const [h,m] = startStr.split(':').map(Number);
+    const d = new Date();
+    d.setHours(h,m,0,0);
+    d.setMinutes(d.getMinutes() + totalMinutes);
+    return d.toTimeString().slice(0,5);
+  }
+
+  // Decides how to calculate the leg between two stops, accounting for
+  // whether either one is "walk-only":
+  // - neither is walk-only -> normal driving leg
+  // - both are walk-only -> entire leg on foot (assumes they're close together)
+  // - only one is, AND it has a parking point defined -> splits into
+  //   driving to the parking spot + walking to the door
+  // - only one is, WITHOUT a parking point -> fallback: entire leg on foot
+  function buildLegParts(originEntry, destEntry){
+    const originLoc = originEntry.coord || originEntry.address;
+    const destLoc = destEntry.coord || destEntry.address;
+    const originWalkOnly = !!originEntry.blockedMatch;
+    const destWalkOnly = !!destEntry.blockedMatch;
+    const originParking = originEntry.blockedMatch?.parkingPoint;
+    const destParking = destEntry.blockedMatch?.parkingPoint;
+
+    if(!originWalkOnly && !destWalkOnly){
+      return [{ mode: 'driving', origin: originLoc, dest: destLoc }];
+    }
+    if(originWalkOnly && destWalkOnly){
+      return [{ mode: 'walking', origin: originLoc, dest: destLoc }];
+    }
+    if(destWalkOnly && destParking){
+      return [
+        { mode: 'driving', origin: originLoc, dest: destParking },
+        { mode: 'walking', origin: destParking, dest: destLoc },
+      ];
+    }
+    if(originWalkOnly && originParking){
+      return [
+        { mode: 'walking', origin: originLoc, dest: originParking },
+        { mode: 'driving', origin: originParking, dest: destLoc },
+      ];
+    }
+    // no parking point defined for the walk-only side
+    return [{ mode: 'walking', origin: originLoc, dest: destLoc }];
+  }
+
+  async function getLegDistance(originVal, destVal, mode){
+    try{
+      const res = await fetch('/api/distance', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ origin: originVal, destination: destVal, mode }),
+      });
+      const data = await res.json();
+      if(!res.ok){
+        return { error: data.error || t('legErrorGeneric', {status: '?'}) };
+      }
+      return data;
+    } catch(err){
+      return { error: t('serverContactError') };
+    }
+  }
+
+  // ---------- Render manifest ----------
+  function renderManifestSkeleton(addressLabels){
+    const area = $('manifestArea');
+    let html = '<div class="manifest">';
+    addressLabels.forEach((entry, idx)=>{
+      const isFinal = idx === addressLabels.length - 1;
+      html += `
+        <div class="stop" data-stop="${idx}">
+          <div class="marker-col">
+            <div class="marker ${isFinal?'final':''}">${isFinal ? '⚑' : idx+1}</div>
+            ${isFinal ? '' : '<div class="track"></div>'}
+          </div>
+          <div class="stop-content">
+            <div class="stop-address-row">
+              <div class="stop-address">${escapeHtml(entry.address)}${entry.isAlias ? `<span class="alias-tag">${entry.fuzzy ? t('aliasTagFuzzy') : t('aliasTagExact')}</span>` : ''}${entry.walkOnly ? `<span class="alias-tag walk-tag">${t('legWalking')}</span>` : ''}${entry.deadlineMinutes != null ? `<span class="alias-tag deadline-tag">🎯 ${String(Math.floor(entry.deadlineMinutes/60)).padStart(2,'0')}:${String(entry.deadlineMinutes%60).padStart(2,'0')}</span>` : ''}</div>
+              <button class="share-btn" data-address="${escapeHtml(entry.address)}" data-coord="${entry.coord ? escapeHtml(entry.coord) : ''}" title="${t('shareTitle')}">
+                <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                  <circle cx="18" cy="5" r="3"></circle>
+                  <circle cx="6" cy="12" r="3"></circle>
+                  <circle cx="18" cy="19" r="3"></circle>
+                  <line x1="8.6" y1="10.6" x2="15.4" y2="6.4"></line>
+                  <line x1="8.6" y1="13.4" x2="15.4" y2="17.6"></line>
+                </svg>
+              </button>
+            </div>
+            ${isFinal ? '' : `<div class="leg-stats" id="leg-stats-${idx}"><span class="stat"><span class="spinner"></span>${t('legCalculating')}</span></div>`}
+          </div>
+        </div>
+      `;
+    });
+    html += '</div><div id="totalsArea"></div>';
+    area.innerHTML = html;
+  }
+
+  // The server returns error messages in PT (e.g. "Não encontrado (ZERO_RESULTS)"
+  // or "Erro na API: OVER_QUERY_LIMIT"). We extract Google's status code
+  // and rebuild the message in the current language.
+  function translateLegError(rawError){
+    if(!rawError) return t('legErrorGeneric', {status: '?'});
+    const parenMatch = rawError.match(/\(([A-Z_]+)\)/);
+    if(parenMatch) return t('legErrorNotFound', {status: parenMatch[1]});
+    const apiMatch = rawError.match(/:\s*([A-Z_]+)\s*$/);
+    if(apiMatch) return t('legErrorGeneric', {status: apiMatch[1]});
+    return rawError; // unknown format, show it as-is
+  }
+
+  function renderLegResult(idx, result, arrivalTime, lateInfo){
+    const el = document.getElementById(`leg-stats-${idx}`);
+    if(!el) return;
+
+    if(result.error){
+      el.innerHTML = `<span class="stat err">${escapeHtml(translateLegError(result.error))}</span>`;
+      return;
+    }
+
+    const arrivalHtml = arrivalTime
+      ? `<span class="stat arrival-indicator">${t('scheduleArrival')} ${arrivalTime}</span>`
+      : '';
+    const lateHtml = lateInfo
+      ? `<span class="stat late-warning">⚠ ${t('lateByMinutes', {minutes: Math.round(lateInfo.byMinutes)})}</span>`
+      : '';
+
+    const parts = result.parts || [];
+    if(parts.length > 1){
+      // split leg (e.g. driving to parking + walking to the door) —
+      // shows one sub-line per part, and the combined total below.
+      const partLines = parts.map(p=>{
+        if(p.error){
+          return `<div class="leg-part err">${p.mode==='walking'?'🚶':'🚗'} ${escapeHtml(translateLegError(p.error))}</div>`;
+        }
+        return `<div class="leg-part">${p.mode==='walking'?'🚶':'🚗'} ${p.distanceText}, ${p.durationText}</div>`;
+      }).join('');
+      el.innerHTML = `
+        <div class="leg-parts">${partLines}</div>
+        <div class="leg-parts-total"><strong>${result.distanceText}</strong> · <strong>${result.durationText}</strong>${arrivalTime ? ` · ${t('scheduleArrival')} ${arrivalTime}` : ''}${lateInfo ? ` · ⚠ ${t('lateByMinutes', {minutes: Math.round(lateInfo.byMinutes)})}` : ''}</div>
+      `;
+    } else {
+      const isWalking = parts[0]?.mode === 'walking';
+      el.innerHTML = `
+        <span class="stat"><strong>${result.distanceText}</strong></span>
+        <span class="stat"><strong>${result.durationText}</strong></span>
+        ${isWalking ? `<span class="stat walk-indicator">${t('legWalking')}</span>` : ''}
+        ${arrivalHtml}
+        ${lateHtml}
+      `;
+    }
+  }
+
+  function renderTotals(totalMeters, totalSeconds, breakMinutes, stopMinutes, stopCount, startTime, canOptimize){
+    const totalKm = (totalMeters/1000).toFixed(1);
+    const drivingMinutes = totalSeconds/60;
+    const totalStopMinutes = stopMinutes * stopCount;
+    const totalWithBreak = drivingMinutes + breakMinutes + totalStopMinutes;
+
+    let html = `
+      <div class="totals-panel">
+        <div class="totals-grid">
+          <div class="total-item">
+            <div class="t-label">${t('totalDistance')}</div>
+            <div class="t-value accent">${totalKm} km</div>
+          </div>
+          <div class="total-item">
+            <div class="t-label">${t('drivingTime')}</div>
+            <div class="t-value">${formatMinutes(drivingMinutes)}</div>
+          </div>
+          <div class="total-item">
+            <div class="t-label">${t('stopTime')}</div>
+            <div class="t-value">${formatMinutes(totalStopMinutes)}</div>
+          </div>
+          <div class="total-item">
+            <div class="t-label">${t('breakTime')}</div>
+            <div class="t-value">${formatMinutes(breakMinutes)}</div>
+          </div>
+          <div class="total-item">
+            <div class="t-label">${t('totalTime')}</div>
+            <div class="t-value green">${formatMinutes(totalWithBreak)}</div>
+          </div>
+        </div>
+    `;
+
+    if(startTime){
+      const endTime = computeEndTime(startTime, totalWithBreak);
+      html += `
+        <div class="schedule-strip">
+          <div class="badge">${t('scheduleStart')} ${startTime}</div>
+          <span class="arrow">─────▶</span>
+          <div class="badge arrival">${t('scheduleArrival')} ${endTime}</div>
+        </div>
+      `;
+    }
+
+    html += `</div>`;
+
+    html += `
+      <div style="display:flex; gap:8px; margin-top:16px;">
+        <button class="btn-ghost export-btn" data-format="csv" style="flex:1; text-align:center;">⬇ CSV</button>
+        <button class="btn-share-qr export-qr-btn" data-format="csv" title="${t('qrShareBtnTitle')}">📱</button>
+        <button class="btn-ghost export-btn" data-format="txt" style="flex:1; text-align:center;">⬇ TXT</button>
+        <button class="btn-share-qr export-qr-btn" data-format="txt" title="${t('qrShareBtnTitle')}">📱</button>
+      </div>
+    `;
+
+    if(canOptimize){
+      html += `
+        <button class="btn-primary optimize-btn-bottom" style="margin-top:10px;">
+          ${t('optimizeBtnText')}
+        </button>
+        <div class="hint" style="text-align:center; margin-top:6px;">${t('optimizeBtnHint')}</div>
+      `;
+    }
+
+    $('totalsArea').innerHTML = html;
+  }
+
+  // ---------- Main calculation flow ----------
+  // Reads the address box and, if the start/end point is filled in,
+  // automatically injects it as the first AND last stop (round trip),
+  // without the user having to write it twice.
+  // Parses an optional deadline suffix on an address line, e.g.
+  // "Rua Augusta 1, Lisboa | 12:00" — must be there by 12:00. Returns
+  // null if the line has no valid "| HH:MM" suffix.
+  function parseDeadlineSuffix(line){
+    const pipeIdx = line.lastIndexOf('|');
+    if(pipeIdx === -1) return { address: line, deadlineMinutes: null };
+    const timePart = line.slice(pipeIdx + 1).trim();
+    const m = /^(\d{1,2}):(\d{2})$/.exec(timePart);
+    if(!m) return { address: line, deadlineMinutes: null };
+    const h = parseInt(m[1], 10), mi = parseInt(m[2], 10);
+    if(h > 23 || mi > 59) return { address: line, deadlineMinutes: null };
+    return { address: line.slice(0, pipeIdx).trim(), deadlineMinutes: h * 60 + mi };
+  }
+
+  function parseHHMMToMinutes(str){
+    const m = /^(\d{1,2}):(\d{2})$/.exec((str || '').trim());
+    if(!m) return null;
+    const h = parseInt(m[1], 10), mi = parseInt(m[2], 10);
+    if(h > 23 || mi > 59) return null;
+    return h * 60 + mi;
+  }
+
+  function buildTextAddresses(){
+    const rawLines = $('addressList').value
+      .split(/\r?\n/)
+      .map(l=>l.trim())
+      .filter(l=>l.length>0 && !l.startsWith('#'));
+
+    const stops = [];
+    const stopDeadlines = [];
+    rawLines.forEach(line=>{
+      const { address, deadlineMinutes } = parseDeadlineSuffix(line);
+      stops.push(address);
+      // An inline "| HH:MM" on the line always wins. If there isn't
+      // one, fall back to a saved delivery-deadline entry for this
+      // address (section 05), if any.
+      if(deadlineMinutes != null){
+        stopDeadlines.push(deadlineMinutes);
+      } else {
+        const savedDeadline = findDeliveryTimeMatch(address);
+        stopDeadlines.push(savedDeadline != null ? parseHHMMToMinutes(savedDeadline) : null);
+      }
+    });
+
+    const startEnd = $('startEndAddress').value.trim();
+    if(startEnd){
+      return {
+        addresses: [startEnd, ...stops, startEnd],
+        deadlines: [null, ...stopDeadlines, null],
+        roundTrip: true,
+      };
+    }
+    return { addresses: stops, deadlines: stopDeadlines, roundTrip: false };
+  }
+
+  async function runCalculate(){
+    clearStatus();
+    const { addresses: rawAddresses, deadlines, roundTrip } = buildTextAddresses();
+    const startTime = $('startTime').value;
+    const breakMinutes = parseFloat($('breakMinutes').value) || 0;
+    const stopMinutes = parseFloat($('stopMinutes').value) || 0;
+
+    if(rawAddresses.length < 2){ showStatus(t('needAtLeast2'), 'error'); return; }
+
+    const btn = $('calcBtn');
+    btn.disabled = true;
+    btn.textContent = t('calcBtnCalculating');
+
+    const labels = rawAddresses.map((addr, idx)=>{
+      const aliasResult = resolveAlias(addr);
+      const blockedMatch = findBlockedMatch(addr);
+      return {
+        address: addr,
+        isAlias: !!aliasResult,
+        fuzzy: aliasResult ? !aliasResult.exact : false,
+        coord: aliasResult ? aliasResult.to : null,
+        walkOnly: !!blockedMatch,
+        blockedMatch,
+        deadlineMinutes: deadlines[idx],
+      };
+    });
+
+    renderManifestSkeleton(labels);
+    clearStatus();
+
+    // Converts a deadline ("must be there by HH:MM", as minutes since
+    // midnight) into minutes elapsed SINCE THE START TIME — so it can be
+    // compared directly against the cumulative elapsed time tracked in
+    // the loop below. Without a start time, there's no way to know
+    // whether a clock-time deadline will be met, so this returns null.
+    let startMinutesOfDay = null;
+    if(startTime){
+      const [sh, sm] = startTime.split(':').map(Number);
+      startMinutesOfDay = sh * 60 + sm;
+    }
+    function deadlineElapsedMinutes(deadlineMinutes){
+      if(deadlineMinutes == null || startMinutesOfDay == null) return null;
+      let diff = deadlineMinutes - startMinutesOfDay;
+      if(diff < 0) diff += 24 * 60; // deadline rolls past midnight — rare, but don't show a nonsense negative
+      return diff;
+    }
+
+    let totalMeters = 0, totalSeconds = 0;
+    let hadError = false;
+    const legResults = [];
+    const arrivalTimes = [];
+    const lateInfoList = []; // null, or { byMinutes } when a stop's deadline is missed
+    let cumulativeSeconds = 0;
+    let arrivalBroken = false; // there's no longer a reliable arrival time after an error
+    let drivingMeters = 0; // only the distance driven by car, for the fuel estimate
+    let anyLate = false;
+
+    for(let i=0; i<labels.length-1; i++){
+      const parts = buildLegParts(labels[i], labels[i+1]);
+      const partResults = [];
+      let legMeters = 0, legSeconds = 0, legError = null;
+
+      for(const part of parts){
+        const r = await getLegDistance(part.origin, part.dest, part.mode);
+        partResults.push({ ...r, mode: part.mode });
+        if(r.error){
+          legError = r.error;
+        } else {
+          legMeters += r.distanceMeters;
+          legSeconds += r.durationSeconds;
+          if(part.mode === 'driving') drivingMeters += r.distanceMeters;
+        }
+      }
+
+      const combined = legError
+        ? { error: legError, parts: partResults }
+        : {
+            distanceMeters: legMeters,
+            distanceText: formatKmShort(legMeters),
+            durationSeconds: legSeconds,
+            durationText: formatMinutes(legSeconds/60),
+            parts: partResults,
+          };
+
+      // estimated arrival time at this stop: start time + driving
+      // accumulated so far + stop time already spent at previous stops
+      // (doesn't count the break, since we don't know where it happens).
+      let arrivalTime = null;
+      let lateInfo = null;
+      if(legError){
+        arrivalBroken = true;
+      } else if(!arrivalBroken){
+        cumulativeSeconds += legSeconds;
+        const arrivalMinutes = (cumulativeSeconds/60) + (stopMinutes * i);
+        if(startTime) arrivalTime = computeEndTime(startTime, arrivalMinutes);
+
+        const deadlineElapsed = deadlineElapsedMinutes(labels[i+1].deadlineMinutes);
+        if(deadlineElapsed != null && arrivalMinutes > deadlineElapsed + 0.5){
+          lateInfo = { byMinutes: arrivalMinutes - deadlineElapsed };
+          anyLate = true;
+        }
+      }
+
+      renderLegResult(i, combined, arrivalTime, lateInfo);
+      legResults.push(combined);
+      arrivalTimes.push(arrivalTime);
+      lateInfoList.push(lateInfo);
+      if(legError){
+        hadError = true;
+      } else {
+        totalMeters += legMeters;
+        totalSeconds += legSeconds;
+      }
+    }
+
+    const fuelCost = (fuelEstimate && fuelEstimate.consumption > 0 && fuelEstimate.price > 0)
+      ? (drivingMeters/1000) * (fuelEstimate.consumption/100) * fuelEstimate.price
+      : null;
+
+    const canOptimize = rawAddresses.length >= 3;
+    renderTotals(totalMeters, totalSeconds, breakMinutes, stopMinutes, labels.length - 1, startTime, canOptimize);
+
+    lastRouteData = {
+      labels, legResults, arrivalTimes, lateInfoList, totalMeters, totalSeconds,
+      breakMinutes, stopMinutes, startTime, canOptimize,
+      fuelCost, fuelCurrency: fuelEstimate?.currency,
+      fuelConsumption: fuelEstimate?.consumption, fuelPrice: fuelEstimate?.price,
+    };
+
+    const walkOnlyStops = labels.filter(l => l.walkOnly);
+    if(walkOnlyStops.length > 0){
+      showStatus(t('blockedFoundInfo', {
+        count: walkOnlyStops.length,
+        list: walkOnlyStops.map(l => l.address).join('; ')
+      }), 'info');
+    }
+
+    if(hadError){
+      showStatus(t('calcPartialError'), 'error');
+    } else if(anyLate){
+      showStatus(t('calcLateWarning'), 'error');
+    } else {
+      showStatus(t('calcSuccess'), 'ok');
+    }
+
+    btn.disabled = false;
+    btn.textContent = t('calcBtnText');
+    refreshCacheStats(); // a rota que acabou de correr provavelmente adicionou entradas
+  }
+
+  $('calcBtn').addEventListener('click', runCalculate);
+
+  // ---------- Share / copy Google Maps link ----------
+  // If there's an alias coordinate, the link uses it directly (already
+  // exact). Otherwise, we ask the server to geocode the address with
+  // Google (getting real lat/lng + place_id), instead of building a
+  // plain text search — ends up much closer to the link Google itself
+  // would generate.
+  function buildGoogleMapsUrlFromCoord(coord){
+    return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(coord)}`;
+  }
+
+  function buildGoogleMapsUrlFromPlace(lat, lng, placeId){
+    return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(lat + ',' + lng)}&query_place_id=${encodeURIComponent(placeId)}`;
+  }
+
+  function buildGoogleMapsUrlFromText(address){
+    return `https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(address)}`;
+  }
+
+  async function resolveShareUrl(address, coord){
+    if(coord) return buildGoogleMapsUrlFromCoord(coord);
+    try{
+      const res = await fetch('/api/geocode?address=' + encodeURIComponent(address));
+      const data = await res.json();
+      if(res.ok && data.placeId){
+        return buildGoogleMapsUrlFromPlace(data.lat, data.lng, data.placeId);
+      }
+      // No placeId (e.g. resolved via the free Swiss geocoder, which has
+      // no equivalent) but we do have real coordinates — still much more
+      // precise than falling back to a plain text search below.
+      if(res.ok && typeof data.lat === 'number' && typeof data.lng === 'number'){
+        return buildGoogleMapsUrlFromCoord(`${data.lat},${data.lng}`);
+      }
+    } catch(err){ /* cai para o fallback abaixo */ }
+    return buildGoogleMapsUrlFromText(address);
+  }
+
+  function flashButton(btnEl, ok){
+    btnEl.classList.toggle('copied', ok);
+    btnEl.setAttribute('title', ok ? t('shareCopied') : t('shareError'));
+    setTimeout(()=>{
+      btnEl.classList.remove('copied');
+      btnEl.setAttribute('title', t('shareTitle'));
+    }, 1500);
+  }
+
+  async function handleShareClick(address, coord, btnEl){
+    btnEl.disabled = true;
+    const url = await resolveShareUrl(address, coord);
+    btnEl.disabled = false;
+    try{
+      await navigator.clipboard.writeText(url);
+      flashButton(btnEl, true);
+    } catch(err){
+      flashButton(btnEl, false);
+    }
+    if(navigator.share){
+      navigator.share({ text: address, url }).catch(()=>{ /* user cancelled, ignore */ });
+    }
+  }
+
+  // ---------- Export route (CSV / TXT) ----------
+  function csvEscape(value){
+    const s = String(value ?? '');
+    if(/[",\n]/.test(s)) return '"' + s.replace(/"/g, '""') + '"';
+    return s;
+  }
+
+  function formatExportTimestamp(){
+    const d = new Date();
+    const pad = n => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())} ${pad(d.getHours())}:${pad(d.getMinutes())}`;
+  }
+
+  function buildExportSummary(data){
+    const totalKm = (data.totalMeters/1000).toFixed(1);
+    const drivingMinutes = data.totalSeconds/60;
+    const stopCount = data.labels.length - 1;
+    const totalStopMinutes = data.stopMinutes * stopCount;
+    const totalWithBreak = drivingMinutes + data.breakMinutes + totalStopMinutes;
+    const summary = [
+      [t('exportedAt'), formatExportTimestamp()],
+      [t('totalDistance'), `${totalKm} km`],
+      [t('drivingTime'), formatMinutes(drivingMinutes)],
+      [t('stopTime'), formatMinutes(totalStopMinutes)],
+      [t('breakTime'), formatMinutes(data.breakMinutes)],
+      [t('totalTime'), formatMinutes(totalWithBreak)],
+    ];
+    if(data.startTime){
+      summary.push([t('scheduleStart'), data.startTime]);
+      summary.push([t('scheduleArrival'), computeEndTime(data.startTime, totalWithBreak)]);
+    }
+    if(data.fuelCost !== null && data.fuelCost !== undefined){
+      const fuelLabel = `${t('fuelCost')} (${t('fuelEstimatedNote')})`;
+      const basis = `${data.fuelConsumption.toFixed(1)} L/100km @ ${data.fuelPrice.toFixed(2)}${data.fuelCurrency ? ' ' + data.fuelCurrency : ''}/L`;
+      summary.push([fuelLabel, `${data.fuelCost.toFixed(2)}${data.fuelCurrency ? ' ' + data.fuelCurrency : ''} (${basis})`]);
+    }
+    return summary;
+  }
+
+  function buildCSV(data){
+    const lines = [];
+    lines.push([ '#', t('section1Label'), t('drivingTime'), t('totalDistance') ].map(csvEscape).join(','));
+    data.labels.forEach((label, i)=>{
+      if(i === 0){
+        lines.push([1, label.address, '', ''].map(csvEscape).join(','));
+      } else {
+        const leg = data.legResults[i-1];
+        const dist = leg && !leg.error ? leg.distanceText : '';
+        const dur = leg && !leg.error ? leg.durationText : (leg && leg.error ? leg.error : '');
+        lines.push([i+1, label.address, dur, dist].map(csvEscape).join(','));
+      }
+    });
+    lines.push('');
+    buildExportSummary(data).forEach(([label, value])=>{
+      lines.push([label, value].map(csvEscape).join(','));
+    });
+    lines.push('');
+    lines.push([t('createdBy')].map(csvEscape).join(','));
+    return lines.join('\r\n');
+  }
+
+  function buildTXT(data){
+    const lines = [];
+    lines.push(t('appTitle'));
+    lines.push('='.repeat(t('appTitle').length));
+    lines.push('');
+    data.labels.forEach((label, i)=>{
+      if(i === 0){
+        lines.push(`1. ${label.address}`);
+      } else {
+        const leg = data.legResults[i-1];
+        const info = leg && !leg.error ? `— ${leg.distanceText}, ${leg.durationText}` : (leg && leg.error ? `— ${leg.error}` : '');
+        lines.push(`${i+1}. ${label.address} ${info}`);
+      }
+    });
+    lines.push('');
+    lines.push('-'.repeat(24));
+    buildExportSummary(data).forEach(([label, value])=>{
+      lines.push(`${label}: ${value}`);
+    });
+    lines.push('');
+    lines.push(t('createdBy'));
+    return lines.join('\n');
+  }
+
+  function timestampForFilename(){
+    const d = new Date();
+    const pad = n => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${pad(d.getMonth()+1)}-${pad(d.getDate())}_${pad(d.getHours())}${pad(d.getMinutes())}`;
+  }
+
+  const MIME_EXTENSIONS = {
+    'text/csv': '.csv',
+    'text/plain': '.txt',
+    'application/json': '.json',
+  };
+
+  // Lets the user pick the exact filename AND the folder to save to,
+  // via the browser's native "Save As" dialog — supported in Chrome,
+  // Edge, and other Chromium-based browsers, and only in a secure
+  // context (https://, or specifically http://localhost). Falls back
+  // to the classic anchor-download approach (browser decides the
+  // folder, usually Downloads) everywhere else.
+  //
+  // Returns { status: 'native' | 'cancelled' | 'fallback', reason }.
+  // "reason" (only set when status is 'fallback') tells the caller WHY
+  // the native dialog wasn't available, so the message shown to the
+  // person is accurate instead of a generic guess:
+  //   'insecure'    -> not a secure context (not https/localhost)
+  //   'unsupported' -> secure context, but this browser doesn't
+  //                    implement the File System Access API at all
+  //                    (e.g. Firefox, Safari)
+  //   'error'       -> the browser has the API, but the call itself
+  //                    failed for some other reason (logged to console)
+  async function classicDownload(filename, content, mime, reason){
+    const blob = new Blob([content], { type: mime + ';charset=utf-8' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(()=>URL.revokeObjectURL(url), 1000);
+    return { status: 'fallback', reason };
+  }
+
+  async function downloadFile(filename, content, mime){
+    if(window.showSaveFilePicker){
+      try{
+        const ext = MIME_EXTENSIONS[mime] || '';
+        const handle = await window.showSaveFilePicker({
+          suggestedName: filename,
+          types: [{ description: mime, accept: { [mime]: ext ? [ext] : [] } }],
+        });
+        const writable = await handle.createWritable();
+        await writable.write(content);
+        await writable.close();
+        return { status: 'native' };
+      } catch(err){
+        if(err && err.name === 'AbortError') return { status: 'cancelled' }; // user closed the dialog
+        console.warn('showSaveFilePicker failed, falling back to a regular download:', err);
+        return await classicDownload(filename, content, mime, 'error');
+      }
+    }
+
+    const reason = window.isSecureContext ? 'unsupported' : 'insecure';
+    return await classicDownload(filename, content, mime, reason);
+  }
+
+  function fallbackNoticeFor(reason){
+    return reason === 'insecure' ? t('exportFallbackNoticeContext') : t('exportFallbackNoticeBrowser');
+  }
+
+  // ---------- Share via QR code ----------
+  // Posts the same content that would have been downloaded to the
+  // server, gets back a short-lived link (see server.js for how long)
+  // and a QR code image, and shows both in a modal. Scanning the code
+  // on another device (e.g. a driver's phone) opens the link directly —
+  // no login needed on that device, no need to physically transfer a
+  // file. Falls apart gracefully if the request fails for any reason
+  // (shows the usual error banner instead of the modal).
+  function showQrModal(url, qrDataUrl, expiresInMinutes, usedLanFallback, lanFallbackFailed){
+    $('qrModalImage').src = qrDataUrl;
+    $('qrModalUrl').textContent = url;
+    $('qrModalExpiry').textContent = t('qrModalExpiry', {minutes: expiresInMinutes});
+    let noteHtml = '';
+    if(lanFallbackFailed){
+      noteHtml = `<div class="qr-modal-note warn">${t('qrModalLanFallbackFailed')}</div>`;
+    } else if(usedLanFallback){
+      noteHtml = `<div class="qr-modal-note">${t('qrModalLanFallbackUsed')}</div>`;
+    }
+    $('qrModalNote').innerHTML = noteHtml;
+    $('qrModalOverlay').style.display = 'flex';
+  }
+  function hideQrModal(){
+    $('qrModalOverlay').style.display = 'none';
+  }
+  $('qrModalClose').addEventListener('click', hideQrModal);
+  $('qrModalOverlay').addEventListener('click', (e)=>{
+    if(e.target === $('qrModalOverlay')) hideQrModal();
+  });
+  $('qrModalCopyBtn').addEventListener('click', async ()=>{
+    const url = $('qrModalUrl').textContent;
+    const btn = $('qrModalCopyBtn');
+    try{
+      await navigator.clipboard.writeText(url);
+      const original = btn.textContent;
+      btn.textContent = t('shareCopied');
+      setTimeout(()=>{ btn.textContent = original; }, 1500);
+    } catch(err){ /* clipboard indisponível, o link já está visível na caixa de texto */ }
+  });
+
+  async function shareViaQr(filename, content, mime, statusFn){
+    try{
+      const res = await fetch('/api/share-export', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ filename, content, mime }),
+      });
+      const data = await res.json();
+      if(!res.ok){
+        (statusFn || showStatus)(data.error || t('qrShareError'), 'error');
+        return;
+      }
+      showQrModal(data.url, data.qrDataUrl, data.expiresInMinutes, data.usedLanFallback, data.lanFallbackFailed);
+    } catch(err){
+      (statusFn || showStatus)(t('serverContactError'), 'error');
+    }
+  }
+
+  // Shares a raw address list instead of pre-formatted content — the
+  // page that opens on the other device shows a clean list (no CSV-style
+  // quoting) and lets that device pick CSV/TXT/JSON on its own, whatever
+  // format was selected here when generating the code.
+  async function shareAddressesViaQr(addresses, statusFn){
+    try{
+      const res = await fetch('/api/share-export', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ addresses }),
+      });
+      const data = await res.json();
+      if(!res.ok){
+        (statusFn || showStatus)(data.error || t('qrShareError'), 'error');
+        return;
+      }
+      showQrModal(data.url, data.qrDataUrl, data.expiresInMinutes, data.usedLanFallback, data.lanFallbackFailed);
+    } catch(err){
+      (statusFn || showStatus)(t('serverContactError'), 'error');
+    }
+  }
+
+  async function handleExport(format){
+    if(!lastRouteData) return;
+    const stamp = timestampForFilename();
+    let result;
+    if(format === 'csv'){
+      result = await downloadFile(`route_${stamp}.csv`, '\uFEFF' + buildCSV(lastRouteData), 'text/csv');
+    } else {
+      result = await downloadFile(`route_${stamp}.txt`, buildTXT(lastRouteData), 'text/plain');
+    }
+    if(result.status === 'fallback'){
+      showStatus(fallbackNoticeFor(result.reason), 'info');
+    }
+  }
+
+  async function handleExportQr(format){
+    if(!lastRouteData) return;
+    const stamp = timestampForFilename();
+    if(format === 'csv'){
+      await shareViaQr(`route_${stamp}.csv`, buildCSV(lastRouteData), 'text/csv');
+    } else {
+      await shareViaQr(`route_${stamp}.txt`, buildTXT(lastRouteData), 'text/plain');
+    }
+  }
+
+  $('manifestArea').addEventListener('click', (e)=>{
+    const shareBtn = e.target.closest('.share-btn');
+    if(shareBtn){
+      handleShareClick(shareBtn.getAttribute('data-address'), shareBtn.getAttribute('data-coord'), shareBtn);
+      return;
+    }
+    const optBtn = e.target.closest('.optimize-btn-bottom');
+    if(optBtn){
+      runOptimize(optBtn);
+      return;
+    }
+    const exportBtn = e.target.closest('.export-btn');
+    if(exportBtn){
+      handleExport(exportBtn.getAttribute('data-format'));
+      return;
+    }
+    const exportQrBtn = e.target.closest('.export-qr-btn');
+    if(exportQrBtn){
+      handleExportQr(exportQrBtn.getAttribute('data-format'));
+      return;
+    }
+  });
+
+  // ---------- Optimize route (appears after calculating) ----------
+  function formatDeadlineHHMM(minutes){
+    return `${String(Math.floor(minutes/60)).padStart(2,'0')}:${String(minutes%60).padStart(2,'0')}`;
+  }
+
+  async function runOptimize(triggerBtn){
+    clearStatus();
+    const { addresses: rawAddresses, deadlines, roundTrip } = buildTextAddresses();
+
+    if(rawAddresses.length < 3){
+      showStatus(t('needAtLeast3'), 'error');
+      return;
+    }
+
+    const mode = 'driving';
+    const restricted = rawAddresses.map(addr => !!findBlockedMatch(addr));
+    const locations = rawAddresses.map(addr => {
+      const aliasResult = resolveAlias(addr);
+      return aliasResult ? aliasResult.to : addr;
+    });
+
+    const startTimeVal = $('startTime').value;
+    let startMinutes = null;
+    if(startTimeVal){
+      const [sh, sm] = startTimeVal.split(':').map(Number);
+      startMinutes = sh * 60 + sm;
+    }
+    const stopMinutesVal = parseFloat($('stopMinutes').value) || 0;
+
+    const originalLabel = triggerBtn.textContent;
+    triggerBtn.disabled = true;
+    triggerBtn.textContent = t('optimizing');
+    showStatus(rawAddresses.length > 50 ? t('optimizingInfoSlow') : t('optimizingInfo'), 'info');
+
+    try{
+      const res = await fetch('/api/optimize', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ addresses: locations, mode, roundTrip, restricted, deadlines, startMinutes, stopMinutes: stopMinutesVal }),
+      });
+      const data = await res.json();
+      if(!res.ok){
+        showStatus(data.error || t('optimizeError'), 'error');
+        triggerBtn.disabled = false;
+        triggerBtn.textContent = originalLabel;
+      } else {
+        // Rebuild each line preserving its "| HH:MM" deadline suffix
+        // (buildTextAddresses stripped it out into the parallel
+        // "deadlines" array — has to go back in, or reordering would
+        // silently drop every deadline the person had set).
+        const reorderedFull = data.order.map(i => ({
+          address: rawAddresses[i],
+          deadlineMinutes: deadlines[i],
+        }));
+        const reorderedStops = roundTrip ? reorderedFull.slice(1, -1) : reorderedFull;
+        const reorderedLines = reorderedStops.map(entry =>
+          entry.deadlineMinutes != null ? `${entry.address} | ${formatDeadlineHHMM(entry.deadlineMinutes)}` : entry.address
+        );
+        $('addressList').value = reorderedLines.join('\n');
+        refreshAliasPicker();
+        refreshBlockedPicker();
+
+        if(data.lateStops && data.lateStops.length > 0){
+          showStatus(t('optimizeLateWarning', {count: data.lateStops.length}), 'error');
+        } else {
+          showStatus(t('optimizeReorderedInfo'), 'info');
+        }
+        await runCalculate(); // automatically recalculate with the new order
+      }
+    } catch(err){
+      showStatus(t('serverContactError'), 'error');
+      triggerBtn.disabled = false;
+      triggerBtn.textContent = originalLabel;
+    }
+  }
+
+  // ---------- Tabs ----------
+  const TAB_PANEL_IDS = {
+    route: 'tabPanelRoute',
+    video: 'tabPanelVideo',
+    verify: 'tabPanelVerify',
+  };
+  function switchToTab(tab){
+    document.querySelectorAll('.tab-btn').forEach(b=>b.classList.toggle('active', b.getAttribute('data-tab')===tab));
+    document.querySelectorAll('.tab-panel').forEach(p=>{
+      p.classList.toggle('active', p.id === TAB_PANEL_IDS[tab]);
+    });
+  }
+  document.querySelectorAll('.tab-btn').forEach(btn=>{
+    btn.addEventListener('click', ()=>{
+      switchToTab(btn.getAttribute('data-tab'));
+    });
+  });
+
+  // ---------- Video/Photo → Address ----------
+  let selectedMediaFile = null;
+  let lastVideoResults = null;
+
+  function updateFileDropText(){
+    const el = $('videoFileText');
+    if(selectedMediaFile){
+      el.textContent = selectedMediaFile.name;
+      el.classList.add('has-file');
+    } else {
+      el.textContent = t('videoDropText');
+      el.classList.remove('has-file');
+    }
+    $('extractBtn').disabled = !selectedMediaFile;
+  }
+
+  $('videoFileInput').addEventListener('change', (e)=>{
+    selectedMediaFile = e.target.files[0] || null;
+    updateFileDropText();
+  });
+
+  // drag and drop
+  const dropZone = $('videoFileDrop');
+  ['dragenter','dragover'].forEach(evt=>{
+    dropZone.addEventListener(evt, (e)=>{
+      e.preventDefault();
+      dropZone.classList.add('dragover');
+    });
+  });
+  ['dragleave','drop'].forEach(evt=>{
+    dropZone.addEventListener(evt, (e)=>{
+      e.preventDefault();
+      dropZone.classList.remove('dragover');
+    });
+  });
+  dropZone.addEventListener('drop', (e)=>{
+    const file = e.dataTransfer.files[0];
+    if(file){
+      selectedMediaFile = file;
+      updateFileDropText();
+    }
+  });
+
+  function showVideoStatus(msg, type){
+    $('videoStatusArea').innerHTML = `<div class="status-banner ${type}">${msg}</div>`;
+  }
+  function clearVideoStatus(){ $('videoStatusArea').innerHTML = ''; }
+
+  async function handleCopyAddress(text, btnEl){
+    try{
+      await navigator.clipboard.writeText(text);
+      const original = btnEl.textContent;
+      btnEl.textContent = t('videoCopied');
+      setTimeout(()=>{ btnEl.textContent = original; }, 1500);
+    } catch(err){ /* ignora falha silenciosa */ }
+  }
+
+  function addAddressToRoute(address, btnEl){
+    const textarea = $('addressList');
+    const current = textarea.value.split(/\r?\n/).map(l=>l.trim()).filter(Boolean);
+    current.push(address);
+    textarea.value = current.join('\n');
+    refreshAliasPicker();
+    refreshBlockedPicker();
+    if(btnEl){
+      const original = btnEl.textContent;
+      btnEl.textContent = t('videoAddedToRoute');
+      btnEl.disabled = true;
+      setTimeout(()=>{ btnEl.textContent = original; btnEl.disabled = false; }, 1500);
+    }
+  }
+
+  function renderVideoResults(data){
+    lastVideoResults = data;
+    const area = $('videoResultsArea');
+    const candidates = data.candidates || [];
+
+    if(candidates.length === 0){
+      let diagnosis = '';
+      if(typeof data.totalReadings === 'number'){
+        diagnosis = data.totalReadings > 0
+          ? t('videoNoResultsButHadReadings', {count: data.totalReadings})
+          : t('videoNoResultsZeroReadings');
+      }
+      area.innerHTML = `
+        <div class="empty-state" style="margin-top:20px;">
+          ${t('videoNoResults')}
+          ${diagnosis ? `<div style="margin-top:8px; font-size:12px; color:var(--text-faint);">${diagnosis}</div>` : ''}
+        </div>
+      `;
+      return;
+    }
+
+    let html = `
+      <div class="block-label" style="margin-top:24px; margin-bottom:12px;">
+        <span class="num">→</span> ${t('videoResultsTitle')}
+      </div>
+      <div style="display:flex; gap:8px; margin-bottom:14px;">
+        <button class="btn-ghost" id="addAllToRouteBtn" style="flex:1;">${t('videoAddAllBtn')}</button>
+        <button class="btn-ghost" id="sendVideoToVerifyBtn" style="flex:1;">${t('sendToVerifyBtn')}</button>
+      </div>
+    `;
+
+    candidates.forEach((c, idx)=>{
+      const displayAddress = c.valid ? c.formattedAddress : c.raw;
+      const ocrBadgeClass = { alta: 'ocr-high', media: 'ocr-medium', baixa: 'ocr-low' }[c.ocrConfidence] || '';
+      const ocrBadgeText = c.ocrConfidence ? t(`videoOcrConfidence_${c.ocrConfidence}`) : '';
+      html += `
+        <div class="video-result-card ${c.valid ? '' : 'invalid'}">
+          <div>
+            <span class="video-result-badge ${c.valid ? '' : 'invalid'}">${c.valid ? t('videoValidBadge') : t('videoInvalidBadge')}</span>
+            ${c.ocrConfidence ? `<span class="video-result-badge ocr-badge ${ocrBadgeClass}">${ocrBadgeText}</span>` : ''}
+            ${c.stopNumber ? `<div class="video-result-stop">${t('videoStopLabel', {num: c.stopNumber})}</div>` : ''}
+            <div class="video-result-address">${escapeHtml(displayAddress)}</div>
+            ${c.valid && c.raw !== c.formattedAddress ? `<div class="video-result-raw">OCR: ${escapeHtml(c.raw)}</div>` : ''}
+            ${c.readings > 1 ? `<div class="video-result-raw">${t('videoReadingsCount', {count: c.readings})}</div>` : ''}
+          </div>
+          <div class="video-result-actions">
+            <button class="btn-ghost copy-result-btn" data-idx="${idx}" style="font-size:11px; padding:6px 10px;">${t('videoCopyAddress')}</button>
+            <button class="btn-ghost add-result-btn" data-idx="${idx}" style="font-size:11px; padding:6px 10px;">${t('videoAddToRoute')}</button>
+          </div>
+        </div>
+      `;
+    });
+
+    if(data.rawText){
+      html += `
+        <div class="raw-text-toggle" id="rawTextToggle">${t('videoShowRawText')}</div>
+        <div class="raw-text-box" id="rawTextBox" style="display:none;">${escapeHtml(data.rawText)}</div>
+      `;
+    }
+
+    area.innerHTML = html;
+
+    area.querySelectorAll('.copy-result-btn').forEach(btn=>{
+      btn.addEventListener('click', ()=>{
+        const c = candidates[parseInt(btn.getAttribute('data-idx'),10)];
+        handleCopyAddress(c.valid ? c.formattedAddress : c.raw, btn);
+      });
+    });
+    area.querySelectorAll('.add-result-btn').forEach(btn=>{
+      btn.addEventListener('click', ()=>{
+        const c = candidates[parseInt(btn.getAttribute('data-idx'),10)];
+        addAddressToRoute(c.valid ? c.formattedAddress : c.raw, btn);
+      });
+    });
+    const addAllBtn = $('addAllToRouteBtn');
+    if(addAllBtn){
+      addAllBtn.addEventListener('click', ()=>{
+        candidates.forEach(c => addAddressToRoute(c.valid ? c.formattedAddress : c.raw, null));
+        addAllBtn.textContent = t('videoAddedToRoute');
+        addAllBtn.disabled = true;
+      });
+    }
+    const sendVideoToVerifyBtn = $('sendVideoToVerifyBtn');
+    if(sendVideoToVerifyBtn){
+      sendVideoToVerifyBtn.addEventListener('click', ()=>{
+        const list = candidates.map(c => c.valid ? c.formattedAddress : c.raw);
+        appendToVerifyTextarea(list.join('\n'));
+        switchToTab('verify');
+      });
+    }
+    const rawToggle = $('rawTextToggle');
+    if(rawToggle){
+      rawToggle.addEventListener('click', ()=>{
+        const box = $('rawTextBox');
+        const isHidden = box.style.display === 'none';
+        box.style.display = isHidden ? 'block' : 'none';
+        rawToggle.textContent = isHidden ? t('videoHideRawText') : t('videoShowRawText');
+      });
+    }
+  }
+
+  // Wraps a multipart upload in XMLHttpRequest instead of fetch, since
+  // fetch doesn't expose real upload progress in a broadly-supported
+  // way — XHR's upload.onprogress does, and is what makes a genuine
+  // byte-based progress bar possible for the video/photo upload itself.
+  function uploadWithProgress(url, formData, onUploadProgress){
+    return new Promise((resolve, reject)=>{
+      const xhr = new XMLHttpRequest();
+      xhr.open('POST', url);
+      xhr.upload.onprogress = (e)=>{
+        if(e.lengthComputable && onUploadProgress) onUploadProgress(e.loaded / e.total);
+      };
+      xhr.onload = ()=>{
+        let data = null;
+        try{ data = JSON.parse(xhr.responseText); } catch(err){ /* resposta nao era JSON */ }
+        resolve({ ok: xhr.status >= 200 && xhr.status < 300, data });
+      };
+      xhr.onerror = ()=> reject(new Error('network error'));
+      xhr.send(formData);
+    });
+  }
+
+  $('extractBtn').addEventListener('click', async ()=>{
+    if(!selectedMediaFile){
+      showVideoStatus(t('videoNoFileError'), 'error');
+      return;
+    }
+
+    clearVideoStatus();
+    $('videoResultsArea').innerHTML = '';
+
+    const btn = $('extractBtn');
+    btn.disabled = true;
+    const originalText = btn.textContent;
+    btn.textContent = t('extractBtnExtracting');
+
+    const progressWrap = $('videoProgressWrap');
+    const progressBar = $('videoProgressBar');
+    const progressLabel = $('videoProgressLabel');
+    progressWrap.style.display = 'block';
+    progressBar.classList.remove('indeterminate');
+    progressBar.style.width = '0%';
+    progressLabel.textContent = t('videoUploading', {percent: 0});
+
+    try{
+      const formData = new FormData();
+      formData.append('media', selectedMediaFile);
+      formData.append('lang', currentLang);
+      formData.append('engine', $('engineSelect').value);
+      formData.append('fps', $('fpsSelect').value);
+
+      const { ok, data } = await uploadWithProgress('/api/extract-addresses', formData, (fraction)=>{
+        const percent = Math.round(fraction * 100);
+        progressBar.style.width = percent + '%';
+        if(percent < 100){
+          progressLabel.textContent = t('videoUploading', {percent});
+        } else {
+          // Upload finished — from here on the server is extracting
+          // frames / running OCR / calling the AI, which can take a
+          // while and isn't something we get real progress ticks for
+          // without a bigger rework (e.g. streaming updates over SSE).
+          // An indeterminate animation is the honest way to show
+          // "still working" rather than a fake percentage.
+          progressBar.classList.add('indeterminate');
+          progressLabel.textContent = t('videoProcessing');
+        }
+      });
+
+      if(!ok){
+        showVideoStatus(t('videoErrorPrefix', {msg: (data && data.error) || '?'}), 'error');
+      } else {
+        clearVideoStatus();
+        if(data.framesProcessed){
+          const engineLabel = data.engine === 'ai' ? t('engineOptionAIShort') : t('engineOptionLocalShort');
+          showVideoStatus(t('videoFramesProcessedWithEngine', {count: data.framesProcessed, engine: engineLabel}), 'ok');
+        }
+        renderVideoResults(data);
+      }
+    } catch(err){
+      showVideoStatus(t('videoErrorPrefix', {msg: t('serverContactError')}), 'error');
+    }
+
+    progressWrap.style.display = 'none';
+    progressBar.classList.remove('indeterminate');
+    btn.disabled = false;
+    btn.textContent = originalText;
+  });
+
+  // ---------- Fix Addresses ----------
+  let lastVerifyResults = null; // stores the results so they can be re-rendered (e.g. on language switch)
+
+  $('verifyFileInput').addEventListener('change', (e)=>{
+    const file = e.target.files[0];
+    if(!file) return;
+    const reader = new FileReader();
+    reader.onload = (evt)=>{ $('verifyTextarea').value = evt.target.result; };
+    reader.readAsText(file);
+  });
+
+  $('clearVerifyBtn').addEventListener('click', ()=>{
+    $('verifyTextarea').value = '';
+    $('verifyFileInput').value = '';
+    $('verifyResultsArea').innerHTML = '';
+    verifyManualEdits = {};
+    lastVerifyResults = null;
+    clearVerifyStatus();
+  });
+
+  function showVerifyStatus(msg, type){
+    $('verifyStatusArea').innerHTML = `<div class="status-banner ${type}">${msg}</div>`;
+  }
+  function clearVerifyStatus(){ $('verifyStatusArea').innerHTML = ''; }
+
+  let verifyManualEdits = {}; // idx -> manually edited text
+
+  function renderVerifyResults(results){
+    lastVerifyResults = results;
+    const area = $('verifyResultsArea');
+
+    const matchCount = results.filter(r=>r.status==='match').length;
+    const correctionCount = results.filter(r=>r.status==='correction').length;
+    const notFoundCount = results.filter(r=>r.status==='not_found' || r.status==='error' || r.status==='imprecise').length;
+
+    let html = `<div class="verify-summary">${t('verifySummary', {matchCount, correctionCount, notFoundCount})}</div>`;
+
+    if(correctionCount > 0){
+      html += `
+        <div class="verify-bulk-actions">
+          <button class="btn-ghost" id="verifyAcceptAllBtn">${t('verifyAcceptAll')}</button>
+          <button class="btn-ghost" id="verifyAcceptNoneBtn">${t('verifyAcceptNone')}</button>
+        </div>
+      `;
+    }
+
+    results.forEach((r, idx)=>{
+      const manualValue = verifyManualEdits[idx];
+      const badgeClass = manualValue ? 'status-manual' : `status-${r.status}`;
+      const badgeText = manualValue ? t('verifyBadgeManual') : ({
+        match: t('verifyBadgeMatch'),
+        correction: t('verifyBadgeCorrection'),
+        imprecise: t('verifyBadgeImprecise'),
+        not_found: t('verifyBadgeNotFound'),
+        error: t('verifyBadgeError'),
+      }[r.status] || r.status);
+
+      // starting value for the edit box: the previous edit, if any,
+      // otherwise the suggestion (when there is one) or the original text.
+      const editStartValue = manualValue || (r.status === 'correction' || r.status === 'imprecise' ? r.suggested : r.original);
+      const mapsQuery = manualValue || (r.status === 'correction' ? r.suggested : r.original);
+
+      html += `<div class="verify-card ${badgeClass}" data-idx="${idx}">`;
+      html += `
+        <div class="verify-card-header">
+          <span class="verify-badge ${badgeClass}">${badgeText}</span>
+          <div class="verify-card-tools">
+            <button class="btn-icon-ghost verify-open-maps" data-idx="${idx}" title="${t('verifyOpenMaps')}">🔗</button>
+            <button class="btn-icon-ghost verify-edit-btn" data-idx="${idx}" title="${t('verifyEditBtn')}">✎</button>
+          </div>
+        </div>
+      `;
+
+      if(manualValue){
+        html += `
+          <div class="verify-original strike">${escapeHtml(r.original)}</div>
+          <div class="verify-suggested"><span class="arrow-in">→</span> ${escapeHtml(manualValue)}</div>
+        `;
+      } else if(r.status === 'correction'){
+        html += `
+          <div class="verify-original strike">${escapeHtml(r.original)}</div>
+          <div class="verify-suggested"><span class="arrow-in">→</span> ${escapeHtml(r.suggested)}</div>
+          <div class="verify-checkbox-row">
+            <input type="checkbox" id="verify-check-${idx}" class="verify-apply-check" data-idx="${idx}" checked />
+            <label for="verify-check-${idx}">${t('verifyApplyLabel')}</label>
+          </div>
+        `;
+      } else if(r.status === 'imprecise'){
+        html += `
+          <div class="verify-original">${escapeHtml(r.original)}</div>
+          <div class="verify-suggested" style="color:var(--text-faint); font-size:12px;">${t('verifyImpreciseNote', {suggested: r.suggested})}</div>
+        `;
+      } else {
+        html += `<div class="verify-original">${escapeHtml(r.original)}</div>`;
+      }
+
+      html += `
+        <div class="verify-edit-row" id="verify-edit-row-${idx}" style="display:none;">
+          <input type="text" class="verify-edit-input" id="verify-edit-input-${idx}" value="${escapeHtml(editStartValue)}" />
+          <button class="btn-ghost verify-edit-save" data-idx="${idx}">${t('verifySaveEdit')}</button>
+          <button class="btn-ghost verify-edit-cancel" data-idx="${idx}">${t('verifyCancelEdit')}</button>
+        </div>
+      `;
+
+      html += `</div>`;
+    });
+
+    html += `
+      <div class="verify-final-actions">
+        <button class="btn-primary" id="verifyApplyToRouteBtn">${t('verifyApplyToRouteBtn')}</button>
+        <button class="btn-ghost" id="verifyExportBtn">${t('verifyExportBtn')}</button>
+        <button class="btn-share-qr" id="verifyExportQrBtn" title="${t('qrShareBtnTitle')}">📱</button>
+      </div>
+    `;
+
+    area.innerHTML = html;
+
+    const acceptAllBtn = $('verifyAcceptAllBtn');
+    if(acceptAllBtn) acceptAllBtn.addEventListener('click', ()=>{
+      area.querySelectorAll('.verify-apply-check').forEach(cb=>cb.checked = true);
+    });
+    const acceptNoneBtn = $('verifyAcceptNoneBtn');
+    if(acceptNoneBtn) acceptNoneBtn.addEventListener('click', ()=>{
+      area.querySelectorAll('.verify-apply-check').forEach(cb=>cb.checked = false);
+    });
+
+    area.querySelectorAll('.verify-open-maps').forEach(btn=>{
+      btn.addEventListener('click', ()=>{
+        const idx = parseInt(btn.getAttribute('data-idx'),10);
+        const r = results[idx];
+        const addr = verifyManualEdits[idx] || (r.status === 'correction' ? r.suggested : r.original);
+        window.open(`https://www.google.com/maps/search/?api=1&query=${encodeURIComponent(addr)}`, '_blank');
+      });
+    });
+
+    area.querySelectorAll('.verify-edit-btn').forEach(btn=>{
+      btn.addEventListener('click', ()=>{
+        const idx = btn.getAttribute('data-idx');
+        const row = document.getElementById(`verify-edit-row-${idx}`);
+        const isHidden = row.style.display === 'none';
+        row.style.display = isHidden ? 'flex' : 'none';
+        if(isHidden) document.getElementById(`verify-edit-input-${idx}`).focus();
+      });
+    });
+
+    area.querySelectorAll('.verify-edit-save').forEach(btn=>{
+      btn.addEventListener('click', ()=>{
+        const idx = btn.getAttribute('data-idx');
+        const input = document.getElementById(`verify-edit-input-${idx}`);
+        const val = input.value.trim();
+        if(val){
+          verifyManualEdits[idx] = val;
+        } else {
+          delete verifyManualEdits[idx];
+        }
+        renderVerifyResults(results);
+      });
+    });
+
+    area.querySelectorAll('.verify-edit-cancel').forEach(btn=>{
+      btn.addEventListener('click', ()=>{
+        const idx = btn.getAttribute('data-idx');
+        document.getElementById(`verify-edit-row-${idx}`).style.display = 'none';
+      });
+    });
+
+    function buildFinalList(){
+      return results.map((r, idx)=>{
+        if(verifyManualEdits[idx]) return verifyManualEdits[idx];
+        if(r.status === 'correction'){
+          const checkbox = document.getElementById(`verify-check-${idx}`);
+          return (checkbox && checkbox.checked) ? r.suggested : r.original;
+        }
+        return r.original; // match, not_found, error, imprecise -> keep the original text
+      });
+    }
+
+    $('verifyApplyToRouteBtn').addEventListener('click', ()=>{
+      const finalList = buildFinalList();
+      $('addressList').value = finalList.join('\n');
+      refreshAliasPicker();
+      refreshBlockedPicker();
+      showVerifyStatus(t('verifyAppliedToRoute'), 'ok');
+    });
+
+    $('verifyExportBtn').addEventListener('click', async ()=>{
+      const finalList = buildFinalList();
+      const result = await downloadFile(`fixed_addresses_${timestampForFilename()}.txt`, finalList.join('\n'), 'text/plain');
+      if(result.status === 'fallback'){
+        showVerifyStatus(fallbackNoticeFor(result.reason), 'info');
+      }
+    });
+
+    $('verifyExportQrBtn').addEventListener('click', async ()=>{
+      const finalList = buildFinalList();
+      await shareAddressesViaQr(finalList, showVerifyStatus);
+    });
+  }
+
+  $('verifyBtn').addEventListener('click', async ()=>{
+    clearVerifyStatus();
+    $('verifyResultsArea').innerHTML = '';
+    verifyManualEdits = {};
+
+    const addresses = $('verifyTextarea').value
+      .split(/\r?\n/)
+      .map(l=>l.trim())
+      .filter(l=>l.length>0 && !l.startsWith('#'));
+
+    if(addresses.length === 0){
+      showVerifyStatus(t('verifyNoAddressesError'), 'error');
+      return;
+    }
+
+    const btn = $('verifyBtn');
+    btn.disabled = true;
+    const originalText = btn.textContent;
+    btn.textContent = t('verifyBtnChecking');
+    showVerifyStatus(`<span class="spinner"></span>${t('verifyProcessing', {count: addresses.length})}`, 'info');
+
+    try{
+      const res = await fetch('/api/verify-addresses', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ addresses }),
+      });
+      const data = await res.json();
+
+      if(!res.ok){
+        showVerifyStatus(t('verifyErrorPrefix', {msg: data.error || '?'}), 'error');
+      } else {
+        clearVerifyStatus();
+        renderVerifyResults(data.results);
+      }
+    } catch(err){
+      showVerifyStatus(t('verifyErrorPrefix', {msg: t('serverContactError')}), 'error');
+    }
+
+    btn.disabled = false;
+    btn.textContent = originalText;
+  });
+
+  // Redraws the already-calculated route results (stops, legs,
+  // totals) in the current language — used when switching language
+  // after a route has already been calculated, so words like "Arrival"
+  // stay in sync.
+  function rerenderRouteResults(){
+    if(!lastRouteData) return;
+    const { labels, legResults, arrivalTimes, lateInfoList, totalMeters, totalSeconds, breakMinutes, stopMinutes, startTime, canOptimize } = lastRouteData;
+    renderManifestSkeleton(labels);
+    legResults.forEach((result, i)=>{
+      renderLegResult(i, result, arrivalTimes[i], lateInfoList ? lateInfoList[i] : null);
+    });
+    renderTotals(totalMeters, totalSeconds, breakMinutes, stopMinutes, labels.length - 1, startTime, canOptimize);
+  }
+
+  // ---------- Theme (auto / light / dark) ----------
+  // Cycles through three states rather than a simple on/off, so
+  // "follow the computer" stays reachable — a plain toggle would force
+  // a permanent manual choice the moment you touched it once.
+  const THEME_STORAGE_KEY = 'route-tracker-theme';
+  const THEME_ORDER = ['auto', 'light', 'dark'];
+  const THEME_ICONS = { auto: '🖥', light: '☀', dark: '🌙' };
+
+  function readSavedTheme(){
+    try{
+      const saved = localStorage.getItem(THEME_STORAGE_KEY);
+      if(THEME_ORDER.includes(saved)) return saved;
+    } catch(err){ /* localStorage indisponível */ }
+    return 'auto';
+  }
+
+  let currentTheme = readSavedTheme();
+
+  function applyTheme(theme){
+    if(theme === 'auto'){
+      // No attribute = the prefers-color-scheme media query decides.
+      document.documentElement.removeAttribute('data-theme');
+    } else {
+      document.documentElement.setAttribute('data-theme', theme);
+    }
+    $('themeToggle').textContent = THEME_ICONS[theme] || THEME_ICONS.auto;
+    $('themeToggle').title = t('themeToggleTitle') + ' — ' + t('theme_' + theme);
+  }
+
+  $('themeToggle').addEventListener('click', ()=>{
+    const next = THEME_ORDER[(THEME_ORDER.indexOf(currentTheme) + 1) % THEME_ORDER.length];
+    currentTheme = next;
+    try{ localStorage.setItem(THEME_STORAGE_KEY, next); } catch(err){ /* ignora */ }
+    applyTheme(next);
+  });
+
+  applyTheme(currentTheme);
+
+  // ---------- Language ----------
+  $('langSelect').value = currentLang;
+  applyStaticTranslations();
+  $('langSelect').addEventListener('change', (e)=>{
+    currentLang = e.target.value;
+    try{ localStorage.setItem(LANG_STORAGE_KEY, currentLang); } catch(err){ /* ignora */ }
+    applyStaticTranslations();
+    refreshAliasPicker();
+    refreshBlockedPicker();
+    refreshDeliveryTimePicker();
+    renderAliases();
+    renderBlocked();
+    renderDeliveryTimes();
+    refreshCacheStats();
+    applyTheme(currentTheme); // re-traduz o título do botão de tema
+    updateFileDropText();
+    rerenderRouteResults();
+    if(lastVideoResults) renderVideoResults(lastVideoResults);
+    if(lastVerifyResults) renderVerifyResults(lastVerifyResults);
+    clearStatus();
+  });
+
+  // ---------- Start/end point (saved locally, for convenience) ----------
+  const STARTEND_STORAGE_KEY = 'route-tracker-startend';
+  try{
+    const savedStartEnd = localStorage.getItem(STARTEND_STORAGE_KEY);
+    if(savedStartEnd) $('startEndAddress').value = savedStartEnd;
+  } catch(err){ /* ignora */ }
+  $('startEndAddress').addEventListener('change', (e)=>{
+    try{ localStorage.setItem(STARTEND_STORAGE_KEY, e.target.value.trim()); } catch(err){ /* ignora */ }
+  });
+
+  // ---------- Fuel (automatic estimate, no fields in the interface) ----------
+  // Asks the server once for a consumption/price estimate based on the
+  // approximate location (IP) and a default value typical of a
+  // delivery van. Only used in exported files (CSV/TXT).
+  let fuelEstimate = null;
+  try{
+    const res = await fetch('/api/fuel-estimate');
+    if(res.ok) fuelEstimate = await res.json();
+  } catch(err){ /* sem estimativa, exportações ficam sem esta linha */ }
+
+  await fetchAliases();
+  renderAliases();
+  await fetchBlocked();
+  renderBlocked();
+  await fetchDeliveryTimes();
+  renderDeliveryTimes();
+  refreshCacheStats();
+  updateFileDropText();
+})();
+</script>
+
+</body>
+</html>
