@@ -6,6 +6,7 @@
 // it possible to see every supported setting without reading 2000 lines.
 
 const path = require("path");
+const Anthropic = require("@anthropic-ai/sdk");
 
 const PORT = process.env.PORT || 3000;
 const API_KEY = process.env.GOOGLE_MAPS_API_KEY;
@@ -70,6 +71,21 @@ const DELIVERY_TIMES_FILE = path.join(DATA_DIR, "delivery-times.json");
 const GEOCODE_CACHE_FILE = path.join(DATA_DIR, "geocode-cache.json");
 const DISTANCE_CACHE_FILE = path.join(DATA_DIR, "distance-cache.json");
 
+// AI engine (Claude vision) for "Video → Address" — optional. Without
+// ANTHROPIC_API_KEY, the app still works, just with only the "local"
+// (tesseract) engine available.
+const ANTHROPIC_API_KEY = process.env.ANTHROPIC_API_KEY;
+const ANTHROPIC_MODEL = process.env.ANTHROPIC_MODEL || "claude-sonnet-5";
+const anthropic = ANTHROPIC_API_KEY ? new Anthropic({ apiKey: ANTHROPIC_API_KEY }) : null;
+
+if (!ANTHROPIC_API_KEY) {
+  console.warn(
+    "ℹ️  ANTHROPIC_API_KEY nao definida — o motor de IA (Claude vision) do " +
+      "separador \"Vídeo → Endereço\" fica desativado. O motor local (tesseract, " +
+      "offline) continua disponivel normalmente."
+  );
+}
+
 module.exports = {
   PORT,
   API_KEY,
@@ -87,4 +103,6 @@ module.exports = {
   DELIVERY_TIMES_FILE,
   GEOCODE_CACHE_FILE,
   DISTANCE_CACHE_FILE,
+  ANTHROPIC_MODEL,
+  anthropic,
 };
