@@ -11,6 +11,7 @@
 <title>Route Tracker Híbrido</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.css">
 <link rel="stylesheet" href="/css/styles.css">
 <script>
   // Runs before anything renders, on purpose: reading the saved theme
@@ -188,6 +189,23 @@ Torre de Belém, Lisboa"></textarea>
     <div id="manifestArea">
       <div class="empty-state" data-i18n="emptyState">Preenche os endereços, depois clica em "Calcular rota".</div>
     </div>
+
+    <div class="block-label" style="margin-top:26px; margin-bottom:16px;"><span class="num">🗺️</span> <span data-i18n="mapSectionLabel">Mapa</span></div>
+    <div id="mapSection">
+      <div id="mapToolbar" class="map-toolbar" style="display:none;">
+        <button class="map-tool-btn active" id="mapToolSelect" type="button" data-i18n="mapToolSelect">✋ Selecionar</button>
+        <button class="map-tool-btn" id="mapToolExclude" type="button" data-i18n="mapToolExclude">🚧 Excluir troço</button>
+        <button class="map-tool-btn" id="mapToolAnimate" type="button" data-i18n="mapToolAnimate">▶️ Animar rota</button>
+      </div>
+      <div id="mapHint" class="map-hint" style="display:none;"></div>
+      <div id="mapContainer" style="display:none;"></div>
+      <div id="mapEmptyState" class="empty-state" data-i18n="mapEmptyState">Calcula uma rota para a veres no mapa.</div>
+      <div id="mapComparisonPanel" class="map-comparison-panel" style="display:none;"></div>
+      <div id="activeRestrictionsSection" style="display:none;">
+        <label class="field-label" style="margin-top:16px;" data-i18n="activeRestrictionsLabel">Troços excluídos ativos</label>
+        <div id="activeRestrictionsList"></div>
+      </div>
+    </div>
   </div>
 
 </div>
@@ -278,6 +296,8 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
 </div>
 
 <script src="/js/translations.js"></script>
+<script src="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.js"></script>
+<script src="/js/map.js"></script>
 <script>
 (async function(){
   const LANG_STORAGE_KEY = 'route-tracker-lang';
@@ -1392,7 +1412,55 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
     btn.disabled = false;
     btn.textContent = t('calcBtnText');
     refreshCacheStats(); // a rota que acabou de correr provavelmente adicionou entradas
+    loadRouteOnMap(); // não bloqueia o resto do fluxo — o mapa é só um extra visual
   }
+
+  // ---------- Map (route display + "Excluir troço") ----------
+  // Gathers exactly the same request shape runOptimize() already sends
+  // to /api/optimize (resolved locations, deadlines, roundTrip, start/stop
+  // minutes) and hands it to map.js, which owns everything about
+  // MapLibre and the /api/route + /api/road-exclusion/* calls from here on.
+  async function loadRouteOnMap(){
+    if(!window.RouteMapUI) return;
+    const { addresses: rawAddresses, deadlines, roundTrip } = buildTextAddresses();
+    if(rawAddresses.length < 2){ window.RouteMapUI.clear(); return; }
+
+    const locations = rawAddresses.map(addr => {
+      const aliasResult = resolveAlias(addr);
+      return aliasResult ? aliasResult.to : addr;
+    });
+
+    const startTimeVal = $('startTime').value;
+    let startMinutes = null;
+    if(startTimeVal){
+      const [sh, sm] = startTimeVal.split(':').map(Number);
+      startMinutes = sh * 60 + sm;
+    }
+    const stopMinutesVal = parseFloat($('stopMinutes').value) || 0;
+
+    await window.RouteMapUI.loadRoute({
+      addresses: locations, roundTrip, deadlines, startMinutes, stopMinutes: stopMinutesVal,
+    });
+  }
+
+  // Called by map.js after the user confirms "Aplicar nova rota" — order
+  // is the same index permutation /api/optimize already returns, so this
+  // reuses runOptimize()'s own reorder-the-textarea logic exactly,
+  // instead of map.js reaching into address/deadline formatting itself.
+  async function applyReorderedRoute(order){
+    const { addresses: rawAddresses, deadlines, roundTrip } = buildTextAddresses();
+    const reorderedFull = order.map(i => ({ address: rawAddresses[i], deadlineMinutes: deadlines[i] }));
+    const reorderedStops = roundTrip ? reorderedFull.slice(1, -1) : reorderedFull;
+    const reorderedLines = reorderedStops.map(entry =>
+      entry.deadlineMinutes != null ? `${entry.address} | ${formatDeadlineHHMM(entry.deadlineMinutes)}` : entry.address
+    );
+    $('addressList').value = reorderedLines.join('\n');
+    refreshAliasPicker();
+    refreshBlockedPicker();
+    showStatus(t('optimizeReorderedInfo'), 'info');
+    await runCalculate(); // já chama loadRouteOnMap() no fim
+  }
+  window.applyReorderedRoute = applyReorderedRoute;
 
   $('calcBtn').addEventListener('click', runCalculate);
 
@@ -2403,6 +2471,7 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
     rerenderRouteResults();
     if(lastVideoResults) renderVideoResults(lastVideoResults);
     if(lastVerifyResults) renderVerifyResults(lastVerifyResults);
+    if(window.RouteMapUI) window.RouteMapUI.retranslate();
     clearStatus();
   });
 
@@ -2434,6 +2503,7 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
   renderDeliveryTimes();
   refreshCacheStats();
   updateFileDropText();
+  if(window.RouteMapUI) window.RouteMapUI.init({ t, escapeHtml });
 })();
 </script>
 

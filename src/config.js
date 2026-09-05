@@ -48,6 +48,16 @@ const ROUTING_SOURCE = (() => {
 const OSRM_URL = (process.env.OSRM_URL || "http://localhost:5000").trim().replace(/\/+$/, "");
 const OSRM_URL_WALKING = (process.env.OSRM_URL_WALKING || "").trim().replace(/\/+$/, "") || null;
 
+// Base URL of a self-hosted Valhalla instance — used only for the map
+// view and the "exclude road segment" feature (see src/valhalla.js).
+// Separate from ROUTING_SOURCE/OSRM_URL on purpose: OSRM keeps serving
+// the address-list optimization exactly as before, while Valhalla is
+// the only engine that supports excluding an arbitrary road segment
+// per-request (via exclude_polygons) without reprocessing the whole
+// graph. No fallback to Google here — if it's not configured, the map
+// endpoints simply respond 501 instead of silently doing nothing.
+const VALHALLA_URL = (process.env.VALHALLA_URL || "").trim().replace(/\/+$/, "") || null;
+
 const VALID_GEOCODING_SOURCES = ["auto", "swisstopo", "google"];
 
 const GEOCODING_SOURCE = (() => {
@@ -97,6 +107,7 @@ module.exports = {
   ROUTING_SOURCE,
   OSRM_URL,
   OSRM_URL_WALKING,
+  VALHALLA_URL,
   DATA_DIR,
   ALIASES_FILE,
   BLOCKED_FILE,

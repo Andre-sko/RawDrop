@@ -20,6 +20,7 @@ const {
   PORT, API_KEY, APP_PASSWORD, SESSION_SECRET,
   VALID_GEOCODING_SOURCES, GEOCODING_SOURCE,
   VALID_ROUTING_SOURCES, ROUTING_SOURCE, OSRM_URL, OSRM_URL_WALKING,
+  VALHALLA_URL,
   DATA_DIR, ALIASES_FILE, BLOCKED_FILE, DELIVERY_TIMES_FILE,
   GEOCODE_CACHE_FILE, DISTANCE_CACHE_FILE, anthropic,
 } = require("./src/config");
@@ -34,6 +35,11 @@ const {
 } = require("./src/api-log");
 const { geocodeAddressBest } = require("./src/geocoding");
 const { osrmSingleLeg, buildMixedDurationMatrix } = require("./src/routing");
+const { valhallaRoute, valhallaMatrix, ValhallaNoRouteError } = require("./src/valhalla");
+const { snapPointToRoute, sliceRouteBetween, bufferSegment } = require("./src/routeGeometry");
+const {
+  createRestriction, listActiveRestrictions, deactivateRestriction, buildExcludePolygonsPayload,
+} = require("./src/roadRestrictions");
 const {
   UPLOAD_DIR, VIDEO_EXT_REGEX, OCR_LANG_BY_UI_LANG,
   extractStopsFromVideoAI, extractStopsFromImageAI,
@@ -107,6 +113,13 @@ if (ROUTING_SOURCE === "osrm") {
         ? `Trocos a pe usam ${OSRM_URL_WALKING}.`
         : `OSRM_URL_WALKING nao definido — trocos a pe continuam a usar a Google.`) +
       ` Se o OSRM estiver indisponivel, a app usa a Google automaticamente para nao te bloquear.`
+  );
+}
+
+if (!VALHALLA_URL) {
+  console.warn(
+    "ℹ️  VALHALLA_URL nao definido — o mapa e a exclusao dinamica de trocos (\"Excluir troco\") " +
+      "ficam desativados. Ve o README para como correr um Valhalla self-hospedado."
   );
 }
 
@@ -1172,6 +1185,189 @@ app.post("/api/optimize", async (req, res) => {
   } catch (err) {
     res.status(500).json({ error: err.message || "Falha ao otimizar a rota" });
   }
+});
+
+// =========================================================================
+// MAP + DYNAMIC ROAD EXCLUSION ("Excluir troço")
+//
+// Uses Valhalla (src/valhalla.js), not OSRM: Valhalla's exclude_polygons
+// lets a single request avoid an arbitrary road segment with no shared
+// state and no graph reload, which is exactly what "preview, compare,
+// cancel" needs. See the code comments in src/roadRestrictions.js for
+// why active restrictions live in memory (Phase 1 only implements the
+// "temporary" restriction type; a permanent, disk-backed store is a
+// planned follow-up, not implemented here).
+// =========================================================================
+
+const MAP_NOT_CONFIGURED_MESSAGE =
+  "VALHALLA_URL nao esta configurado no .env — a funcionalidade de mapa esta desativada.";
+
+// How far (meters) a clicked point is allowed to be from the displayed
+// route before it's rejected as "not actually on the route" — clicking
+// far from the line would otherwise silently slice a nonsensical
+// segment (turf.lineSlice always projects onto the line, however far).
+const MAX_CLICK_TO_ROUTE_METERS = 60;
+
+// POST /api/route  Body: { addresses: string[], mode, roundTrip }
+// Returns full route geometry (for the map) for the given stops IN THE
+// GIVEN ORDER — this does not reorder anything, it just draws the route
+// through the addresses as given. All currently active road
+// restrictions are applied automatically.
+app.post("/api/route", async (req, res) => {
+  if (!VALHALLA_URL) {
+    return res.status(501).json({ error: MAP_NOT_CONFIGURED_MESSAGE });
+  }
+
+  const { addresses } = req.body || {};
+  if (!Array.isArray(addresses) || addresses.length < 2) {
+    return res.status(400).json({ error: "sao precisos pelo menos 2 enderecos" });
+  }
+
+  try {
+    const excludePolygons = buildExcludePolygonsPayload(listActiveRestrictions());
+    const route = await valhallaRoute(addresses, { excludePolygons });
+    res.json(route);
+  } catch (err) {
+    if (err instanceof ValhallaNoRouteError) {
+      return res.status(422).json({ error: err.message });
+    }
+    res.status(500).json({ error: err.message || "Falha ao calcular a rota no Valhalla" });
+  }
+});
+
+// POST /api/road-exclusion/preview
+// Body: {
+//   addresses, mode, roundTrip, deadlines, startMinutes, stopMinutes,  // same shape as /api/optimize
+//   routeGeometry: GeoJSON LineString,   // the route currently on screen
+//   previousRoute: { distanceMeters, durationSeconds },  // from the last /api/route call
+//   pointA: [lng, lat], pointB: [lng, lat],   // the two clicks
+//   reason: string,
+// }
+// Does NOT persist anything — this is the "preview" step, safe to
+// discard. Slices+buffers the segment between the two points, adds it
+// to whatever restrictions are already active, re-optimizes the stop
+// order against a Valhalla matrix that respects all of that, and
+// returns a full before/after comparison.
+app.post("/api/road-exclusion/preview", async (req, res) => {
+  if (!VALHALLA_URL) {
+    return res.status(501).json({ error: MAP_NOT_CONFIGURED_MESSAGE });
+  }
+
+  const {
+    addresses, roundTrip, deadlines, startMinutes, stopMinutes,
+    routeGeometry, previousRoute, pointA, pointB, reason,
+  } = req.body || {};
+
+  if (!Array.isArray(addresses) || addresses.length < 2) {
+    return res.status(400).json({ error: "sao precisos pelo menos 2 enderecos" });
+  }
+  if (!routeGeometry || !Array.isArray(routeGeometry.coordinates)) {
+    return res.status(400).json({ error: "routeGeometry e obrigatorio" });
+  }
+  if (!Array.isArray(pointA) || pointA.length !== 2 || !Array.isArray(pointB) || pointB.length !== 2) {
+    return res.status(400).json({ error: "pointA e pointB sao obrigatorios ([lng, lat])" });
+  }
+
+  try {
+    const snapA = snapPointToRoute(routeGeometry, pointA);
+    const snapB = snapPointToRoute(routeGeometry, pointB);
+    if (snapA.distanceToClick * 1000 > MAX_CLICK_TO_ROUTE_METERS || snapB.distanceToClick * 1000 > MAX_CLICK_TO_ROUTE_METERS) {
+      return res.status(400).json({ error: "Os pontos selecionados tem de estar sobre a rota apresentada." });
+    }
+
+    const excludedSegment = sliceRouteBetween(routeGeometry, pointA, pointB);
+    if (!excludedSegment.coordinates || excludedSegment.coordinates.length < 2) {
+      return res.status(400).json({ error: "Nao foi possivel identificar um troco entre os dois pontos." });
+    }
+    const excludePolygon = bufferSegment(excludedSegment, 12);
+
+    const draftRestriction = {
+      type: "temporary",
+      geometry: excludedSegment,
+      excludePolygon,
+      reason: reason || "",
+    };
+
+    const activePolygons = buildExcludePolygonsPayload(listActiveRestrictions());
+    const allExcludePolygons = [...activePolygons, excludePolygon];
+
+    const deadlineArr = Array.isArray(deadlines) && deadlines.length === addresses.length ? deadlines : null;
+    const startMin = typeof startMinutes === "number" ? startMinutes : null;
+    const stopMin = typeof stopMinutes === "number" ? stopMinutes : 0;
+
+    const matrix = await valhallaMatrix(addresses, { excludePolygons: allExcludePolygons });
+    const order = optimizeOrder(matrix, !!roundTrip, { deadlines: deadlineArr, startMinutes: startMin, stopMinutes: stopMin });
+
+    // If the best order still has to cross a pair the exclusion made
+    // impossible, there simply is no valid alternative — surface that
+    // clearly instead of handing back a broken/incomplete route.
+    const isImpossible = order.some((idx, i) => i > 0 && matrix[order[i - 1]][idx] === Infinity);
+    if (isImpossible) {
+      return res.status(422).json({
+        error: "Nao foi encontrada uma rota alternativa valida para este troco.",
+      });
+    }
+
+    const reorderedAddresses = order.map((i) => addresses[i]);
+    const lateStops = computeLatenessReport(order, matrix, deadlineArr, startMin, stopMin);
+    const newRoute = await valhallaRoute(reorderedAddresses, { excludePolygons: allExcludePolygons });
+
+    const prevDistance = previousRoute && typeof previousRoute.distanceMeters === "number" ? previousRoute.distanceMeters : null;
+    const prevDuration = previousRoute && typeof previousRoute.durationSeconds === "number" ? previousRoute.durationSeconds : null;
+    const orderChanged = order.some((idx, i) => idx !== i);
+    const affectedCount = order.filter((idx, i) => idx !== i).length;
+
+    res.json({
+      excludedSegment,
+      draftRestriction,
+      newRoute,
+      order,
+      reorderedAddresses,
+      lateStops,
+      comparison: {
+        previousDistanceMeters: prevDistance,
+        previousDurationSeconds: prevDuration,
+        newDistanceMeters: newRoute.distanceMeters,
+        newDurationSeconds: newRoute.durationSeconds,
+        deltaDistanceMeters: prevDistance !== null ? newRoute.distanceMeters - prevDistance : null,
+        deltaDurationSeconds: prevDuration !== null ? newRoute.durationSeconds - prevDuration : null,
+        orderChanged,
+        affectedCount,
+      },
+    });
+  } catch (err) {
+    if (err instanceof ValhallaNoRouteError) {
+      return res.status(422).json({ error: err.message });
+    }
+    res.status(500).json({ error: err.message || "Falha ao pre-visualizar a exclusao do troco" });
+  }
+});
+
+// POST /api/road-exclusion/confirm  Body: { draftRestriction }
+// Persists the restriction that /api/road-exclusion/preview proposed
+// (the ONLY point in this flow that mutates any state) — call this only
+// after the user explicitly confirms "Aplicar nova rota".
+app.post("/api/road-exclusion/confirm", (req, res) => {
+  const { draftRestriction } = req.body || {};
+  if (!draftRestriction || !draftRestriction.geometry || !draftRestriction.excludePolygon) {
+    return res.status(400).json({ error: "draftRestriction (com geometry e excludePolygon) e obrigatorio" });
+  }
+  const entry = createRestriction(draftRestriction);
+  res.json(entry);
+});
+
+// GET /api/road-restrictions -> lists currently active road restrictions
+app.get("/api/road-restrictions", (req, res) => {
+  res.json(listActiveRestrictions());
+});
+
+// DELETE /api/road-restrictions/:id -> removes (deactivates) one
+app.delete("/api/road-restrictions/:id", (req, res) => {
+  const entry = deactivateRestriction(req.params.id);
+  if (!entry) {
+    return res.status(404).json({ error: "restricao nao encontrada" });
+  }
+  res.json({ removed: true, id: entry.id });
 });
 
 // -----------------------------------------------------------------------

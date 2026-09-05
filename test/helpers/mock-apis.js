@@ -27,6 +27,34 @@ function record(service) {
   } catch (err) { /* ignora */ }
 }
 
+// Minimal polyline6 encoder (mirrors src/valhalla.js's decodePolyline6,
+// precision 1e6) — only used so the mock's /route response round-trips
+// through the real decoder cleanly. coords: [[lat, lon], ...]
+function encodePolyline6(coords) {
+  function encodeSigned(num) {
+    let n = num < 0 ? ~(num << 1) : num << 1;
+    let output = "";
+    while (n >= 0x20) {
+      output += String.fromCharCode((0x20 | (n & 0x1f)) + 63);
+      n >>= 5;
+    }
+    output += String.fromCharCode(n + 63);
+    return output;
+  }
+  let output = "";
+  let prevLat = 0;
+  let prevLon = 0;
+  for (const [lat, lon] of coords) {
+    const lat6 = Math.round(lat * 1e6);
+    const lon6 = Math.round(lon * 1e6);
+    output += encodeSigned(lat6 - prevLat);
+    output += encodeSigned(lon6 - prevLon);
+    prevLat = lat6;
+    prevLon = lon6;
+  }
+  return output;
+}
+
 function lookupMatrix(origin, destination) {
   const m = cfg.matrix || {};
   const key = origin + "|" + destination;
@@ -61,6 +89,50 @@ global.fetch = async (url, ...rest) => {
             y: 46.9481,
           },
         }],
+      }),
+    };
+  }
+
+  if (raw.endsWith("/route") || raw.endsWith("/sources_to_targets")) {
+    record("valhalla");
+    if (cfg.valhallaDown) throw new Error("Valhalla indisponivel (teste)");
+
+    const opts = rest[0] || {};
+    const body = opts.body ? JSON.parse(opts.body) : {};
+    const excluded = Array.isArray(body.exclude_polygons) && body.exclude_polygons.length > 0;
+
+    if (raw.endsWith("/sources_to_targets")) {
+      const n = (body.sources || []).length;
+      // Pair (0,1)/(1,0) is the one every test "excludes" — everything
+      // else stays cheap, so re-optimizing has a real alternative to
+      // find UNLESS cfg.valhallaNoRoute makes every pair unreachable
+      // once excluded (used for the "no alternative exists" test).
+      const sourcesToTargets = Array.from({ length: n }, (_, i) =>
+        Array.from({ length: n }, (_, j) => {
+          if (i === j) return { from_index: i, to_index: j, time: 0, distance: 0 };
+          const blocked = excluded && (cfg.valhallaNoRoute || ((i === 0 && j === 1) || (i === 1 && j === 0)));
+          return { from_index: i, to_index: j, time: blocked ? null : 300, distance: blocked ? null : 3 };
+        }));
+      return { ok: true, json: async () => ({ sources_to_targets: sourcesToTargets }) };
+    }
+
+    // /route
+    if (excluded && cfg.valhallaNoRoute) {
+      return {
+        ok: false,
+        status: 400,
+        json: async () => ({ error_code: 442, error: "No path could be found for input" }),
+      };
+    }
+    const locations = body.locations || [];
+    const shape = encodePolyline6(locations.map((l) => [l.lat, l.lon]));
+    const legs = locations.slice(1).map(() => ({ shape, summary: { length: excluded ? 8.8 : 5, time: excluded ? 900 : 500 } }));
+    const totalLength = legs.reduce((s, l) => s + l.summary.length, 0);
+    const totalTime = legs.reduce((s, l) => s + l.summary.time, 0);
+    return {
+      ok: true,
+      json: async () => ({
+        trip: { legs, summary: { length: totalLength, time: totalTime }, status: 0, status_message: "Found route between points" },
       }),
     };
   }

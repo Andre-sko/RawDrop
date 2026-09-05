@@ -817,6 +817,88 @@ OSRM is genuinely being used and you're not silently paying Google.
 You can also confirm from the [API request log](#google-api-request-log):
 the `osrm` counter shows real OSRM usage and never has a cost attached.
 
+## Map + dynamic road exclusion (Valhalla)
+
+The "🗺️ Mapa" section (shown once a route is calculated) draws the route
+on an interactive [MapLibre GL JS](https://maplibre.org/) map and lets
+you pick two points directly on it to mark a stretch as blocked (roadworks,
+a closed street, restricted access, …) — 🚧 **Excluir troço**. Unlike just
+hiding the line, this is a real exclusion applied to the road network the
+routing engine uses: the next calculation genuinely avoids it, and the
+delivery order is re-optimized around it, keeping every other address,
+deadline and restriction as they were.
+
+This uses a **separate engine from OSRM**:
+[Valhalla](https://valhalla.github.io/valhalla/) supports excluding an
+arbitrary polygon per request (`exclude_polygons`), with no shared state
+and no need to reprocess the whole graph — exactly what "preview,
+compare, cancel" needs. OSRM has no equivalent (only a full,
+process-wide dataset reload), so it keeps doing what it already does
+(the address-list optimization) unaffected by any of this.
+
+### Setting it up (Docker, reusing the same `switzerland/` extract)
+
+```bash
+# Reuses the .osm.pbf you already downloaded for OSRM above — if you
+# skipped that section, grab one first (see step 1 there).
+docker run -d --name valhalla -p 8002:8002 \
+  -v "${PWD}/switzerland:/custom_files" \
+  ghcr.io/gis-ops/docker-valhalla/valhalla:latest
+```
+
+The image builds Valhalla's own tiles from the `.osm.pbf` it finds in
+`/custom_files` on first run (a one-off, similar in spirit to
+`osrm-extract`/`osrm-partition`/`osrm-customize` above — give it a few
+minutes) and then serves the routing API on port 8002.
+
+Then in `.env`:
+```
+VALHALLA_URL=http://localhost:8002
+```
+
+Check it's alive:
+```bash
+curl -X POST http://localhost:8002/route -H "Content-Type: application/json" \
+  -d '{"locations":[{"lat":46.9481,"lon":7.4474},{"lat":47.3769,"lon":8.5417}],"costing":"auto"}'
+```
+
+Without `VALHALLA_URL` set, the map section stays hidden with a short
+explanation — everything else in the app works exactly as before.
+
+### Starting it again later (after a reboot)
+
+The `docker run` command above only needs to happen **once** — it creates
+the container and builds the tiles from the `.osm.pbf`. After that (e.g.
+after restarting your machine), just start the existing container again,
+which skips the tile-building step and is almost instant:
+
+```bash
+docker start valhalla
+```
+
+Check it's running:
+
+```bash
+docker ps --filter name=valhalla
+```
+
+If the container was removed (`docker rm`) rather than just stopped,
+you'll need the original `docker run -d --name valhalla ...` command
+again instead — it will rebuild the tiles from `switzerland/` (a few
+minutes), since there's no container left to restart.
+
+### Phase 1 scope
+
+This first version implements **temporary** exclusions only: picked on
+the map, applied to every route calculation for as long as the server
+keeps running (kept in memory, not written to disk). Two things from the
+original design are intentionally not built yet — a **permanent**
+restriction type saved across restarts and reused by future
+optimizations, and a **penalty** mode (a road that's merely expensive,
+not fully blocked). Multi-level undo/redo is also not in this version —
+each excluded segment can be removed individually from the "Troços
+excluídos ativos" list under the map.
+
 ## Persistent cache (saves money)
 
 The app automatically stores, in a file on the server, addresses already
