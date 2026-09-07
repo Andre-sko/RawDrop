@@ -43,8 +43,93 @@ function bufferSegment(lineStringGeometry, meters = 12) {
   return buffered.geometry;
 }
 
+const EARTH_RADIUS_M = 6371000;
+
+function haversineMeters(a, b) {
+  const toRad = (d) => (d * Math.PI) / 180;
+  const dLat = toRad(b[1] - a[1]);
+  const dLng = toRad(b[0] - a[0]);
+  const h =
+    Math.sin(dLat / 2) ** 2 +
+    Math.cos(toRad(a[1])) * Math.cos(toRad(b[1])) * Math.sin(dLng / 2) ** 2;
+  return 2 * EARTH_RADIUS_M * Math.asin(Math.sqrt(h));
+}
+
+function lineLengthMeters(lineStringGeometry) {
+  const coords = lineStringGeometry.coordinates;
+  let total = 0;
+  for (let i = 1; i < coords.length; i++) total += haversineMeters(coords[i - 1], coords[i]);
+  return total;
+}
+
+// Perimeter of a polygon's outer ring — the number Valhalla actually
+// budgets against (it sums this across every exclude_polygon and
+// refuses the request past service_limits.max_exclude_polygons_length).
+function polygonPerimeterMeters(polygonGeometry) {
+  const ring = polygonGeometry.coordinates[0];
+  let total = 0;
+  for (let i = 1; i < ring.length; i++) total += haversineMeters(ring[i - 1], ring[i]);
+  return total;
+}
+
+// Shortens a segment to at most `maxMeters`, keeping the part around
+// `anchorPoint` (the spot the user actually clicked) or, without one,
+// the middle.
+//
+// Blocking a whole stop-to-stop leg is what breaks Valhalla's budget: a
+// buffered segment's perimeter is about twice its length, so a 6km leg
+// alone is over the 10km total. Blocking a shorter piece of the same
+// road is equally effective for routing — the road still can't be driven
+// through — while leaving budget for other blocks.
+function trimSegmentToLength(lineStringGeometry, maxMeters, anchorPoint) {
+  const coords = lineStringGeometry.coordinates;
+  if (coords.length < 2) return lineStringGeometry;
+
+  const cumulative = [0];
+  for (let i = 1; i < coords.length; i++) {
+    cumulative.push(cumulative[i - 1] + haversineMeters(coords[i - 1], coords[i]));
+  }
+  const total = cumulative[cumulative.length - 1];
+  if (total <= maxMeters) return lineStringGeometry;
+
+  // Where to centre the kept piece: the anchor's position along the
+  // line, or the midpoint.
+  let centre = total / 2;
+  if (Array.isArray(anchorPoint)) {
+    let bestErr = Infinity;
+    for (let i = 0; i < coords.length; i++) {
+      const err = haversineMeters(anchorPoint, coords[i]);
+      if (err < bestErr) { bestErr = err; centre = cumulative[i]; }
+    }
+  }
+
+  let from = centre - maxMeters / 2;
+  let to = centre + maxMeters / 2;
+  if (from < 0) { to -= from; from = 0; }
+  if (to > total) { from -= to - total; to = total; }
+  if (from < 0) from = 0;
+
+  const pointAt = (target) => {
+    let i = 1;
+    while (i < cumulative.length && cumulative[i] < target) i++;
+    i = Math.min(i, cumulative.length - 1);
+    const segStart = cumulative[i - 1];
+    const segLength = cumulative[i] - segStart;
+    const ratio = segLength > 0 ? (target - segStart) / segLength : 0;
+    const a = coords[i - 1];
+    const b = coords[i];
+    return [a[0] + (b[0] - a[0]) * ratio, a[1] + (b[1] - a[1]) * ratio];
+  };
+
+  const middle = coords.filter((_, i) => cumulative[i] > from && cumulative[i] < to);
+  return { type: "LineString", coordinates: [pointAt(from)].concat(middle, [pointAt(to)]) };
+}
+
 module.exports = {
   snapPointToRoute,
   sliceRouteBetween,
   bufferSegment,
+  lineLengthMeters,
+  polygonPerimeterMeters,
+  trimSegmentToLength,
 };

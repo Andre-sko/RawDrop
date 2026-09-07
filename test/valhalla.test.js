@@ -114,4 +114,38 @@ describe("road segment exclusion (Valhalla)", () => {
       assert.strictEqual(res.status, 400);
     } finally { await s.stop(); }
   });
+
+  // Regression: a road block saved earlier (e.g. yesterday, via the map)
+  // has to be honoured the next time the DAILY route is optimized from
+  // scratch — not just while that same block is being interactively
+  // previewed on the map. Otherwise /api/optimize hands back a stop order
+  // built as if the road were still open, and the app just detours around
+  // the block to reach whatever the "next number" happens to be instead
+  // of visiting the nearest reachable stop first.
+  test("/api/optimize routes around an already-saved road restriction, not just the map preview", async () => {
+    const s = await startServer({ env: { VALHALLA_URL: "http://localhost:8002", APP_PASSWORD: "" } });
+    try {
+      const before = await postJson(s.baseUrl, "/api/route", { addresses: [A, B, C] });
+      const preview = await postJson(s.baseUrl, "/api/road-exclusion/preview", {
+        addresses: [A, B, C],
+        routeGeometry: ROUTE_GEOMETRY,
+        previousRoute: { distanceMeters: before.body.distanceMeters, durationSeconds: before.body.durationSeconds },
+        pointA: POINT_A,
+        pointB: POINT_B,
+      });
+      await postJson(s.baseUrl, "/api/road-exclusion/confirm", { draftRestriction: preview.body.draftRestriction });
+
+      // Fresh optimize call, as the app makes when planning a route for
+      // the day — no preview/exclusion payload of its own, just the
+      // address list. The A-B block saved above is already active.
+      const optimized = await postJson(s.baseUrl, "/api/optimize", {
+        addresses: [A, B, C], mode: "driving",
+      });
+      assert.strictEqual(optimized.status, 200);
+      assert.deepStrictEqual(
+        optimized.body.order, [0, 2, 1],
+        "devia visitar C antes de B para evitar o troco A-B bloqueado, nao manter a ordem original"
+      );
+    } finally { await s.stop(); }
+  });
 });

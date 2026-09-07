@@ -58,6 +58,21 @@ const OSRM_URL_WALKING = (process.env.OSRM_URL_WALKING || "").trim().replace(/\/
 // endpoints simply respond 501 instead of silently doing nothing.
 const VALHALLA_URL = (process.env.VALHALLA_URL || "").trim().replace(/\/+$/, "") || null;
 
+// Valhalla refuses a request whose exclude_polygons exceed a total
+// circumference (service_limits.max_exclude_polygons_length, 10km by
+// default) — summed across every polygon, not per polygon. A buffered
+// road segment has a perimeter of roughly twice its length, so this
+// budget is really "about 5km of blocked road in total".
+//
+// MAX_BLOCK_SEGMENT_METERS caps how much of a segment a single block
+// covers, so blocking a long stop-to-stop leg can't spend the whole
+// budget by itself. Blocking a shorter piece of the same road is just as
+// effective — the road still can't be driven through.
+//
+// Raise both together if you raise the limit in your own Valhalla config.
+const VALHALLA_MAX_EXCLUDE_CIRCUMFERENCE = Number(process.env.VALHALLA_MAX_EXCLUDE_CIRCUMFERENCE || 10000);
+const MAX_BLOCK_SEGMENT_METERS = Number(process.env.MAX_BLOCK_SEGMENT_METERS || 1000);
+
 const VALID_GEOCODING_SOURCES = ["auto", "swisstopo", "google"];
 
 const GEOCODING_SOURCE = (() => {
@@ -80,6 +95,7 @@ const BLOCKED_FILE = path.join(DATA_DIR, "blocked.json");
 const DELIVERY_TIMES_FILE = path.join(DATA_DIR, "delivery-times.json");
 const GEOCODE_CACHE_FILE = path.join(DATA_DIR, "geocode-cache.json");
 const DISTANCE_CACHE_FILE = path.join(DATA_DIR, "distance-cache.json");
+const ROAD_RESTRICTIONS_FILE = path.join(DATA_DIR, "road-restrictions.json");
 
 // AI engine (Claude vision) for "Video → Address" — optional. Without
 // ANTHROPIC_API_KEY, the app still works, just with only the "local"
@@ -108,12 +124,15 @@ module.exports = {
   OSRM_URL,
   OSRM_URL_WALKING,
   VALHALLA_URL,
+  VALHALLA_MAX_EXCLUDE_CIRCUMFERENCE,
+  MAX_BLOCK_SEGMENT_METERS,
   DATA_DIR,
   ALIASES_FILE,
   BLOCKED_FILE,
   DELIVERY_TIMES_FILE,
   GEOCODE_CACHE_FILE,
   DISTANCE_CACHE_FILE,
+  ROAD_RESTRICTIONS_FILE,
   ANTHROPIC_MODEL,
   anthropic,
 };

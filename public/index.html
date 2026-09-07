@@ -1,5 +1,5 @@
 <!--
-  Route Tracker Híbrido
+  Route Tracker
   Copyright (c) 2026 André Soares. All rights reserved.
   See LICENSE at the project root.
 -->
@@ -8,7 +8,7 @@
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Route Tracker Híbrido</title>
+<title>Route Tracker</title>
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.css">
@@ -33,9 +33,12 @@
 <body>
 
 <header>
+  <div class="logo-wrap">
+    <img src="/logo.png" alt="" width="44" height="44" class="logo-img" />
+    <h1 class="logo-name display" data-i18n="appTitle">Route Tracker</h1>
+  </div>
   <div class="header-text">
     <div class="eyebrow"><span data-i18n="eyebrow">Ferramenta de rota</span> &mdash; André</div>
-    <h1 class="display" data-i18n="appTitle">Route Tracker Híbrido</h1>
     <p data-i18n="appDescription">Insere os endereços na ordem de visita, calcula distância e tempo entre paragens, e obtém a hora de chegada a partir de uma hora de início e uma pausa. Endereços que a API não reconheça podem ser corrigidos com um alias de coordenadas GPS. A chave da API fica guardada no servidor, nunca no browser.</p>
   </div>
   <div class="header-controls">
@@ -192,18 +195,34 @@ Torre de Belém, Lisboa"></textarea>
 
     <div class="block-label" style="margin-top:26px; margin-bottom:16px;"><span class="num">🗺️</span> <span data-i18n="mapSectionLabel">Mapa</span></div>
     <div id="mapSection">
-      <div id="mapToolbar" class="map-toolbar" style="display:none;">
-        <button class="map-tool-btn active" id="mapToolSelect" type="button" data-i18n="mapToolSelect">✋ Selecionar</button>
-        <button class="map-tool-btn" id="mapToolExclude" type="button" data-i18n="mapToolExclude">🚧 Excluir troço</button>
-        <button class="map-tool-btn" id="mapToolAnimate" type="button" data-i18n="mapToolAnimate">▶️ Animar rota</button>
-      </div>
-      <div id="mapHint" class="map-hint" style="display:none;"></div>
-      <div id="mapContainer" style="display:none;"></div>
-      <div id="mapEmptyState" class="empty-state" data-i18n="mapEmptyState">Calcula uma rota para a veres no mapa.</div>
-      <div id="mapComparisonPanel" class="map-comparison-panel" style="display:none;"></div>
-      <div id="activeRestrictionsSection" style="display:none;">
-        <label class="field-label" style="margin-top:16px;" data-i18n="activeRestrictionsLabel">Troços excluídos ativos</label>
-        <div id="activeRestrictionsList"></div>
+      <div class="map-with-stops">
+        <div id="stopsPanel" class="stops-panel" style="display:none;">
+          <div class="stops-panel-title" data-i18n="stopsPanelTitle">Paragens</div>
+          <div id="stopsPanelList" class="stops-panel-list"></div>
+        </div>
+        <div class="map-main">
+          <div id="mapToolbar" class="map-toolbar" style="display:none;">
+            <button class="map-tool-btn active" id="mapToolSelect" type="button" data-i18n="mapToolSelect">✋ Selecionar</button>
+            <button class="map-tool-btn" id="mapToolExclude" type="button" data-i18n="mapToolExclude">🚧 Bloquear via</button>
+            <button class="map-tool-btn" id="mapToolRevert" type="button" style="display:none;" data-i18n="mapToolRevert">↩️ Reverter bloqueio</button>
+            <button class="map-tool-btn" id="mapToolAnimate" type="button" data-i18n="mapToolAnimate">▶️ Animar rota</button>
+            <button class="map-tool-btn" id="mapToolAnimateStop" type="button" style="display:none;" data-i18n="mapToolAnimateStop">⏹️ Parar animação</button>
+            <div class="anim-speed-group" id="animSpeedGroup" style="display:none;">
+              <button class="anim-speed-btn" data-speed="0.5" type="button">0.5x</button>
+              <button class="anim-speed-btn active" data-speed="1" type="button">1x</button>
+              <button class="anim-speed-btn" data-speed="2" type="button">2x</button>
+              <button class="anim-speed-btn" data-speed="4" type="button">4x</button>
+            </div>
+          </div>
+          <div id="mapHint" class="map-hint" style="display:none;"></div>
+          <div id="mapContainer" style="display:none;"></div>
+          <div id="mapEmptyState" class="empty-state" data-i18n="mapEmptyState">Calcula uma rota para a veres no mapa.</div>
+          <div id="mapComparisonPanel" class="map-comparison-panel" style="display:none;"></div>
+          <div id="activeRestrictionsSection" style="display:none;">
+            <label class="field-label" style="margin-top:16px;" data-i18n="activeRestrictionsLabel">Troços excluídos ativos</label>
+            <div id="activeRestrictionsList"></div>
+          </div>
+        </div>
       </div>
     </div>
   </div>
@@ -1065,7 +1084,12 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
           </div>
           <div class="stop-content">
             <div class="stop-address-row">
-              <div class="stop-address">${escapeHtml(entry.address)}${entry.isAlias ? `<span class="alias-tag">${entry.fuzzy ? t('aliasTagFuzzy') : t('aliasTagExact')}</span>` : ''}${entry.walkOnly ? `<span class="alias-tag walk-tag">${t('legWalking')}</span>` : ''}${entry.deadlineMinutes != null ? `<span class="alias-tag deadline-tag">🎯 ${String(Math.floor(entry.deadlineMinutes/60)).padStart(2,'0')}:${String(entry.deadlineMinutes%60).padStart(2,'0')}</span>` : ''}</div>
+              <div class="stop-address">${escapeHtml(entry.address)}<button class="copy-addr-btn" data-address="${escapeHtml(entry.address)}" title="${t('copyAddressTitle')}" type="button">
+                  <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
+                    <rect x="9" y="9" width="11" height="11" rx="2"></rect>
+                    <path d="M5 15H4a1 1 0 0 1-1-1V4a1 1 0 0 1 1-1h10a1 1 0 0 1 1 1v1"></path>
+                  </svg>
+                </button>${entry.isAlias ? `<span class="alias-tag">${entry.fuzzy ? t('aliasTagFuzzy') : t('aliasTagExact')}</span>` : ''}${entry.walkOnly ? `<span class="alias-tag walk-tag">${t('legWalking')}</span>` : ''}${entry.deadlineMinutes != null ? `<span class="alias-tag deadline-tag">🎯 ${String(Math.floor(entry.deadlineMinutes/60)).padStart(2,'0')}:${String(entry.deadlineMinutes%60).padStart(2,'0')}</span>` : ''}</div>
               <button class="share-btn" data-address="${escapeHtml(entry.address)}" data-coord="${entry.coord ? escapeHtml(entry.coord) : ''}" title="${t('shareTitle')}">
                 <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
                   <circle cx="18" cy="5" r="3"></circle>
@@ -1509,6 +1533,18 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
     }, 1500);
   }
 
+  async function handleCopyAddrBtn(address, btnEl){
+    try{
+      await navigator.clipboard.writeText(address);
+      btnEl.classList.add('copied');
+      btnEl.setAttribute('title', t('copyAddressCopied'));
+      setTimeout(()=>{
+        btnEl.classList.remove('copied');
+        btnEl.setAttribute('title', t('copyAddressTitle'));
+      }, 1200);
+    } catch(err){ /* falha silenciosa — nao ha nada de critico para reportar aqui */ }
+  }
+
   async function handleShareClick(address, coord, btnEl){
     btnEl.disabled = true;
     const url = await resolveShareUrl(address, coord);
@@ -1785,6 +1821,11 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
     const shareBtn = e.target.closest('.share-btn');
     if(shareBtn){
       handleShareClick(shareBtn.getAttribute('data-address'), shareBtn.getAttribute('data-coord'), shareBtn);
+      return;
+    }
+    const copyAddrBtn = e.target.closest('.copy-addr-btn');
+    if(copyAddrBtn){
+      handleCopyAddrBtn(copyAddrBtn.getAttribute('data-address'), copyAddrBtn);
       return;
     }
     const optBtn = e.target.closest('.optimize-btn-bottom');

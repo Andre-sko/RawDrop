@@ -20,7 +20,7 @@ const {
   PORT, API_KEY, APP_PASSWORD, SESSION_SECRET,
   VALID_GEOCODING_SOURCES, GEOCODING_SOURCE,
   VALID_ROUTING_SOURCES, ROUTING_SOURCE, OSRM_URL, OSRM_URL_WALKING,
-  VALHALLA_URL,
+  VALHALLA_URL, MAX_BLOCK_SEGMENT_METERS,
   DATA_DIR, ALIASES_FILE, BLOCKED_FILE, DELIVERY_TIMES_FILE,
   GEOCODE_CACHE_FILE, DISTANCE_CACHE_FILE, anthropic,
 } = require("./src/config");
@@ -36,9 +36,13 @@ const {
 const { geocodeAddressBest } = require("./src/geocoding");
 const { osrmSingleLeg, buildMixedDurationMatrix } = require("./src/routing");
 const { valhallaRoute, valhallaMatrix, ValhallaNoRouteError } = require("./src/valhalla");
-const { snapPointToRoute, sliceRouteBetween, bufferSegment } = require("./src/routeGeometry");
 const {
-  createRestriction, listActiveRestrictions, deactivateRestriction, buildExcludePolygonsPayload,
+  snapPointToRoute, sliceRouteBetween, bufferSegment, trimSegmentToLength,
+  polygonPerimeterMeters, lineLengthMeters,
+} = require("./src/routeGeometry");
+const {
+  createRestriction, listActiveRestrictions, listAllRestrictions,
+  deactivateRestriction, buildExcludePolygonsPayload,
 } = require("./src/roadRestrictions");
 const {
   UPLOAD_DIR, VIDEO_EXT_REGEX, OCR_LANG_BY_UI_LANG,
@@ -202,7 +206,7 @@ function renderAddressesSharePage(addresses) {
   const items = addresses.map((a) => `<li>${escapeHtmlServer(a)}</li>`).join("");
   return `<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Route Tracker Híbrido — shared addresses</title>
+<title>Route Tracker — shared addresses</title>
 <style>
   body{background:#14171c;color:#e8e6e1;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;padding:20px;max-width:480px;margin:0 auto;}
   h1{font-size:15px;font-weight:600;margin:0 0 16px;color:#b7b3a9;}
@@ -293,7 +297,7 @@ if (APP_PASSWORD) {
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Route Tracker Híbrido — Login</title>
+<title>Route Tracker — Login</title>
 <style>
   body{
     margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center;
@@ -318,7 +322,7 @@ if (APP_PASSWORD) {
 </head>
 <body>
   <form class="box" method="POST" action="/login">
-    <h1>Route Tracker Híbrido</h1>
+    <h1>Route Tracker</h1>
     <p class="sub">Introduz a palavra-passe para continuar.</p>
     ${error ? `<div class="error">${error}</div>` : ""}
     <input type="password" name="password" placeholder="Palavra-passe" autofocus required />
@@ -1178,7 +1182,22 @@ app.post("/api/optimize", async (req, res) => {
   const stopMin = typeof stopMinutes === "number" ? stopMinutes : 0;
 
   try {
-    const durations = await buildMixedDurationMatrix(addresses, mode || "driving", restrictedFlags);
+    // A road restriction saved earlier (e.g. via the map, on a previous
+    // day) must still shape today's stop order — otherwise the order
+    // gets built as if the road were open, and the app only reacts to
+    // the block later, while drawing the route, by detouring to whatever
+    // stop that blind order already put next instead of visiting the
+    // nearest reachable one. Valhalla is the only engine that can score
+    // pairs around an excluded segment, so active restrictions switch the
+    // matrix source for this request; with none active, nothing changes.
+    const activeRestrictions = listActiveRestrictions();
+    let durations;
+    if (activeRestrictions.length > 0 && VALHALLA_URL) {
+      const { polygons } = buildExcludePolygonsPayload(activeRestrictions);
+      durations = await valhallaMatrix(addresses, { excludePolygons: polygons });
+    } else {
+      durations = await buildMixedDurationMatrix(addresses, mode || "driving", restrictedFlags);
+    }
     const order = optimizeOrder(durations, !!roundTrip, { deadlines: deadlineArr, startMinutes: startMin, stopMinutes: stopMin });
     const lateStops = computeLatenessReport(order, durations, deadlineArr, startMin, stopMin);
     res.json({ order, lateStops });
@@ -1224,9 +1243,12 @@ app.post("/api/route", async (req, res) => {
   }
 
   try {
-    const excludePolygons = buildExcludePolygonsPayload(listActiveRestrictions());
-    const route = await valhallaRoute(addresses, { excludePolygons });
-    res.json(route);
+    const { polygons, skipped } = buildExcludePolygonsPayload(listActiveRestrictions());
+    const route = await valhallaRoute(addresses, { excludePolygons: polygons });
+    // Reported rather than swallowed: a block that isn't being applied
+    // means the map would otherwise route through a road it draws as
+    // closed, which is the one thing worse than refusing the request.
+    res.json(skipped.length > 0 ? { ...route, skippedRestrictions: skipped } : route);
   } catch (err) {
     if (err instanceof ValhallaNoRouteError) {
       return res.status(422).json({ error: err.message });
@@ -1255,7 +1277,7 @@ app.post("/api/road-exclusion/preview", async (req, res) => {
 
   const {
     addresses, roundTrip, deadlines, startMinutes, stopMinutes,
-    routeGeometry, previousRoute, pointA, pointB, reason,
+    routeGeometry, previousRoute, pointA, pointB, reason, scheduleOnly, anchorPoint,
   } = req.body || {};
 
   if (!Array.isArray(addresses) || addresses.length < 2) {
@@ -1275,11 +1297,20 @@ app.post("/api/road-exclusion/preview", async (req, res) => {
       return res.status(400).json({ error: "Os pontos selecionados tem de estar sobre a rota apresentada." });
     }
 
-    const excludedSegment = sliceRouteBetween(routeGeometry, pointA, pointB);
-    if (!excludedSegment.coordinates || excludedSegment.coordinates.length < 2) {
+    const fullSegment = sliceRouteBetween(routeGeometry, pointA, pointB);
+    if (!fullSegment.coordinates || fullSegment.coordinates.length < 2) {
       return res.status(400).json({ error: "Nao foi possivel identificar um troco entre os dois pontos." });
     }
+
+    // Blocking a whole stop-to-stop leg can be several km, and a
+    // buffered segment's perimeter is about twice its length — past
+    // Valhalla's total exclude_polygons budget on its own. Keeping the
+    // piece around the click blocks the same road just as effectively.
+    const excludedSegment = trimSegmentToLength(fullSegment, MAX_BLOCK_SEGMENT_METERS, anchorPoint);
     const excludePolygon = bufferSegment(excludedSegment, 12);
+    const requestedMeters = Math.round(lineLengthMeters(fullSegment));
+    const blockedMeters = Math.round(lineLengthMeters(excludedSegment));
+    const trimmed = blockedMeters < requestedMeters - 1;
 
     const draftRestriction = {
       type: "temporary",
@@ -1288,8 +1319,25 @@ app.post("/api/road-exclusion/preview", async (req, res) => {
       reason: reason || "",
     };
 
-    const activePolygons = buildExcludePolygonsPayload(listActiveRestrictions());
-    const allExcludePolygons = [...activePolygons, excludePolygon];
+    // A block that only starts in the future must not touch today's
+    // route: re-optimizing against it would reorder the stops now for a
+    // road that is still perfectly usable. The caller just needs the
+    // segment geometry so it can be saved and applied when its window
+    // opens, so everything below (matrix, optimize, route) is skipped.
+    if (scheduleOnly) {
+      return res.json({
+        excludedSegment, draftRestriction, scheduled: true,
+        trimmed, blockedMeters, requestedMeters,
+      });
+    }
+
+    // The new block goes in first so it always applies; older ones fill
+    // whatever circumference budget is left after reserving its own.
+    const { polygons: activePolygons, skipped } = buildExcludePolygonsPayload(
+      listActiveRestrictions(),
+      { reservedMeters: polygonPerimeterMeters(excludePolygon) }
+    );
+    const allExcludePolygons = [excludePolygon, ...activePolygons];
 
     const deadlineArr = Array.isArray(deadlines) && deadlines.length === addresses.length ? deadlines : null;
     const startMin = typeof startMinutes === "number" ? startMinutes : null;
@@ -1320,6 +1368,10 @@ app.post("/api/road-exclusion/preview", async (req, res) => {
     res.json({
       excludedSegment,
       draftRestriction,
+      trimmed,
+      blockedMeters,
+      requestedMeters,
+      skippedRestrictions: skipped,
       newRoute,
       order,
       reorderedAddresses,
@@ -1352,12 +1404,43 @@ app.post("/api/road-exclusion/confirm", (req, res) => {
   if (!draftRestriction || !draftRestriction.geometry || !draftRestriction.excludePolygon) {
     return res.status(400).json({ error: "draftRestriction (com geometry e excludePolygon) e obrigatorio" });
   }
-  const entry = createRestriction(draftRestriction);
+
+  // startsAt/expiresAt carry the "block for today / a date / a range /
+  // for ever" choice made in the browser, so they're checked rather than
+  // trusted: an unparseable date would otherwise become a block that
+  // silently never applies (or never lifts).
+  const parseWindowDate = (value) => {
+    if (value === undefined || value === null || value === "") return null;
+    const ms = new Date(value).getTime();
+    return Number.isNaN(ms) ? undefined : new Date(ms).toISOString();
+  };
+  const startsAt = parseWindowDate(draftRestriction.startsAt);
+  const expiresAt = parseWindowDate(draftRestriction.expiresAt);
+  if (startsAt === undefined || expiresAt === undefined) {
+    return res.status(400).json({ error: "startsAt/expiresAt tem de ser uma data valida (ou nulo)" });
+  }
+  if (startsAt && expiresAt && new Date(startsAt).getTime() >= new Date(expiresAt).getTime()) {
+    return res.status(400).json({ error: "o fim do bloqueio tem de ser depois do inicio" });
+  }
+
+  const entry = createRestriction({ ...draftRestriction, startsAt, expiresAt });
   res.json(entry);
 });
 
-// GET /api/road-restrictions -> lists currently active road restrictions
+// GET /api/road-restrictions -> lists the road restrictions currently in
+// force. With ?includeScheduled=1 it also returns blocks whose window
+// hasn't opened yet, so the interface can show (and cancel) something
+// the user scheduled for a future date instead of it being invisible
+// until the day it starts applying.
 app.get("/api/road-restrictions", (req, res) => {
+  if (req.query.includeScheduled === "1") {
+    const now = Date.now();
+    return res.json(
+      listAllRestrictions().filter(
+        (r) => r.active && (!r.expiresAt || new Date(r.expiresAt).getTime() > now)
+      )
+    );
+  }
   res.json(listActiveRestrictions());
 });
 
@@ -1390,5 +1473,5 @@ app.use((err, req, res, next) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`Route Tracker Híbrido a correr em http://localhost:${PORT}`);
+  console.log(`Route Tracker a correr em http://localhost:${PORT}`);
 });
