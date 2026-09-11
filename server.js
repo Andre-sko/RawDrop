@@ -34,8 +34,8 @@ const {
   API_LOG_FILE, apiLog, todayKey, logApiRequest, buildCostEstimate,
 } = require("./src/api-log");
 const { geocodeAddressBest } = require("./src/geocoding");
-const { osrmSingleLeg, buildMixedDurationMatrix, resolveToCoords } = require("./src/routing");
-const { valhallaRoute, valhallaMatrix, ValhallaNoRouteError } = require("./src/valhalla");
+const { osrmSingleLeg, buildMixedDurationMatrix, overlayWalkingMatrix, resolveToCoords } = require("./src/routing");
+const { valhallaRoute, valhallaRouteMixed, valhallaMatrix, ValhallaNoRouteError } = require("./src/valhalla");
 const {
   snapPointToRoute, sliceRouteBetween, bufferSegment, trimSegmentToLength,
   polygonPerimeterMeters, lineLengthMeters, pointInsidePolygon,
@@ -1249,6 +1249,14 @@ app.post("/api/optimize", async (req, res) => {
       if (relevant.length > 0) {
         const { polygons } = buildExcludePolygonsPayload(relevant);
         durations = await valhallaMatrix(addresses, { excludePolygons: polygons });
+        // Without this, a "walk-only" stop (secção 04, "Endereços
+        // interditos") that also happens to sit near an active road
+        // restriction got NO walking fallback at all — only the plain
+        // buildMixedDurationMatrix() path below applies it, which this
+        // branch skips entirely. That's exactly the case where it matters
+        // most: the van can't reach the stop by road (correctly excluded),
+        // but on foot it's perfectly reachable.
+        durations = await overlayWalkingMatrix(durations, addresses, restrictedFlags);
       } else {
         durations = await buildMixedDurationMatrix(addresses, mode || "driving", restrictedFlags);
       }
@@ -1312,22 +1320,60 @@ app.post("/api/route", async (req, res) => {
     return res.status(501).json({ error: MAP_NOT_CONFIGURED_MESSAGE });
   }
 
-  const { addresses } = req.body || {};
+  const { addresses, restricted } = req.body || {};
   if (!Array.isArray(addresses) || addresses.length < 2) {
     return res.status(400).json({ error: "sao precisos pelo menos 2 enderecos" });
   }
+  const restrictedFlags = Array.isArray(restricted) && restricted.length === addresses.length
+    ? restricted.map(Boolean)
+    : addresses.map(() => false);
 
+  let relevantRestrictions = [];
   try {
     const points = await resolveAddressPoints(addresses);
-    const relevantRestrictions = restrictionsNear(points, listActiveRestrictions());
+    relevantRestrictions = restrictionsNear(points, listActiveRestrictions());
     const { polygons, skipped } = buildExcludePolygonsPayload(relevantRestrictions);
-    const route = await valhallaRoute(addresses, { excludePolygons: polygons });
+    // "Endereços interditos" (secção 04) stops need their leg(s) walked
+    // instead of driven — see valhallaRouteMixed's doc comment. Only
+    // taken when at least one is actually in this request; the common
+    // case (no walk-only stops) stays the single whole-trip call, which
+    // lets Valhalla optimise the drive across every stop at once instead
+    // of leg by leg.
+    const route = restrictedFlags.some(Boolean)
+      ? await valhallaRouteMixed(addresses, restrictedFlags, { excludePolygons: polygons })
+      : await valhallaRoute(addresses, { excludePolygons: polygons });
     // Reported rather than swallowed: a block that isn't being applied
     // means the map would otherwise route through a road it draws as
     // closed, which is the one thing worse than refusing the request.
     res.json(skipped.length > 0 ? { ...route, skippedRestrictions: skipped } : route);
   } catch (err) {
     if (err instanceof ValhallaNoRouteError) {
+      // Valhalla's own message ("No path could be found...") never says
+      // which stop is the problem. The usual cause is a stop whose own
+      // geocoded point falls inside an active restriction's buffered
+      // polygon — Valhalla then can't route to it from ANY direction, no
+      // matter that the driver knows a perfectly good way in from the
+      // other end of the street (see pointInsidePolygon's doc comment).
+      // Name that stop instead of leaving a generic routing error.
+      const resolved = await Promise.all(addresses.map((a) => resolveToCoords(a).catch(() => null)));
+      const blocked = [];
+      resolved.forEach((point, idx) => {
+        if (!point) return;
+        const hits = relevantRestrictions.filter((r) => pointInsidePolygon(point, r.excludePolygon));
+        if (hits.length === 0) return;
+        // Several restrictions can overlap the same spot (e.g. a general
+        // block plus a later, more specific one) — prefer whichever one
+        // actually explains itself over a blank reason.
+        const withReason = hits.find((r) => r.reason) || hits[0];
+        blocked.push({ address: addresses[idx], reason: withReason.reason });
+      });
+      if (blocked.length > 0) {
+        const names = blocked.map((b) => (b.reason ? `${b.address} (${b.reason})` : b.address)).join("; ");
+        return res.status(422).json({
+          error: `Nao e possivel chegar a: ${names} — o proprio endereco fica dentro de um troco bloqueado.`,
+          blockedAddresses: blocked,
+        });
+      }
       return res.status(422).json({ error: err.message });
     }
     res.status(500).json({ error: err.message || "Falha ao calcular a rota no Valhalla" });

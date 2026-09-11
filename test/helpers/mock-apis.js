@@ -140,13 +140,37 @@ global.fetch = async (url, ...rest) => {
   if (raw.includes("/route/v1/") || raw.includes("/table/v1/")) {
     record("osrm");
     if (cfg.osrmDown) throw new Error("OSRM indisponivel (teste)");
+    // Mirrors a real single-profile OSRM instance (see routing.js's "one
+    // instance = one profile" note): cfg.osrmProfileByHost maps a
+    // hostname (so OSRM_URL and OSRM_URL_WALKING can point at two
+    // different mock "instances" in the same test) to the ONLY profile
+    // segment it accepts — anything else 400s, exactly like a real
+    // walking-only instance rejecting a "/driving/" request.
+    const profile = u.pathname.split("/")[3];
+    const expectedProfile = (cfg.osrmProfileByHost || {})[u.hostname];
+    if (expectedProfile && profile !== expectedProfile) {
+      return { ok: false, status: 400, json: async () => ({ code: "InvalidUrl", message: "Profile not found" }) };
+    }
     if (raw.includes("/route/v1/")) {
       return { ok: true, json: async () => ({ code: "Ok", routes: [{ distance: 5000, duration: 500 }] }) };
     }
     const coords = u.pathname.split("/").pop().split(";");
-    const n = coords.length;
-    const durations = Array.from({ length: n }, (_, i) =>
-      Array.from({ length: n }, (_, j) => (i === j ? 0 : 300)));
+    // Mirrors a real OSRM instance's --max-table-size: the FULL
+    // coordinate list in the path (not just sources or destinations
+    // alone) is what a real server caps — so a request that skips
+    // chunking sends every address here and trips this exactly like a
+    // production instance would.
+    if (typeof cfg.osrmMaxTableCoords === "number" && coords.length > cfg.osrmMaxTableCoords) {
+      return {
+        ok: false, status: 400,
+        json: async () => ({ code: "RequestTooLarge", message: `Number of entries ${coords.length} exceeds maximum ${cfg.osrmMaxTableCoords}` }),
+      };
+    }
+    const sourcesParam = u.searchParams.get("sources");
+    const destParam = u.searchParams.get("destinations");
+    const sourceIdx = sourcesParam ? sourcesParam.split(";").map(Number) : coords.map((_, i) => i);
+    const destIdx = destParam ? destParam.split(";").map(Number) : coords.map((_, i) => i);
+    const durations = sourceIdx.map((i) => destIdx.map((j) => (i === j ? 0 : 300)));
     return { ok: true, json: async () => ({ code: "Ok", durations }) };
   }
 

@@ -137,6 +137,42 @@ describe("optimizing still optimizes", () => {
   });
 });
 
+// Regression: 2-opt only ever REVERSES a stretch of the route — it can
+// never pick a single stop up and drop it somewhere else entirely. That
+// matters most for exactly the case a road block creates: a stop that's
+// suddenly expensive to reach from its current neighbours, but cheap
+// from some OTHER stop elsewhere in the round (a different approach
+// street the block doesn't touch). 2-opt alone tends to leave that stop
+// stuck between whatever two neighbours it already had; reversing a
+// segment around it changes those neighbours' order, but it never
+// relocates the stop next to its actual cheapest match. Or-opt (try
+// every stop at every other position) is what a segment reversal
+// structurally cannot do.
+//
+// This exact matrix (random 2D points) was found by brute-force search
+// specifically because 2-opt-only settles for a worse route (1299) than
+// adding Or-opt does (1274) — not hand-crafted to sound plausible.
+describe("2-opt alone can get stuck where Or-opt does not", () => {
+  const D = [
+    [0, 161, 463, 767, 665, 658, 578],
+    [161, 0, 376, 691, 668, 658, 546],
+    [463, 376, 0, 315, 397, 383, 230],
+    [767, 691, 315, 0, 360, 347, 250],
+    [665, 668, 397, 360, 0, 15, 172],
+    [658, 658, 383, 347, 15, 0, 157],
+    [578, 546, 230, 250, 172, 157, 0],
+  ];
+
+  test("finds the cheaper route a 2-opt-only pass settles short of", () => {
+    const order = optimizeOrder(D, false);
+    const cost = routeSeconds(D, order);
+    assert.ok(
+      cost <= 1274,
+      `esperava <= 1274 (o optimo local que o Or-opt encontra), veio ${cost} de ${JSON.stringify(order)}`
+    );
+  });
+});
+
 describe("deadlines outrank a shorter route", () => {
   // Arriving late is the failure the driver actually pays for, so the
   // cost function is allowed to pick a LONGER route to avoid it. Built

@@ -25,7 +25,7 @@ function loadMapHelpers() {
 
 const {
   buildCumulative, pointAtDistance, computeStopMarkers,
-  sliceCoordsBetween, legEndForDistance,
+  sliceCoordsBetween, legEndForDistance, pickClosestFeature,
 } = loadMapHelpers();
 
 // ~111 km per degree of latitude, so 0.001° is ~111 m. Routes below are
@@ -186,5 +186,38 @@ describe("legEndForDistance", () => {
       legEndForDistance(offset, 50), 1,
       "um clique antes da primeira paragem tem de bloquear o primeiro troco"
     );
+  });
+});
+
+describe("pickClosestFeature", () => {
+  // Regression: when two stops overlap on the map (same address, or just
+  // close together), MapLibre's click event lists every matching feature
+  // topmost-first — render order, which is the LAST stop added to the
+  // route (the highest seq), not whichever pin the user actually pointed
+  // at. Picking e.features[0] made clicking stop 10 report stop 11.
+  const stop10 = { properties: { seq: 10 }, geometry: { coordinates: at(46.9) } };
+  const stop11 = { properties: { seq: 11 }, geometry: { coordinates: at(46.900001) } };
+
+  test("picks the feature nearest the click, not the topmost one", () => {
+    // MapLibre would list the higher seq (rendered on top) first.
+    const picked = pickClosestFeature([stop11, stop10], at(46.9));
+    assert.strictEqual(picked.properties.seq, 10, "o clique foi em cima da paragem 10, nao da 11");
+  });
+
+  test("a single matching feature is returned as-is", () => {
+    assert.strictEqual(pickClosestFeature([stop10], at(46.9)).properties.seq, 10);
+  });
+
+  // Real-world case: two stops with the exact same address text geocode to
+  // byte-identical coordinates (the geocode cache is keyed by address, see
+  // src/cache.js), so distance can't break the tie at all. The map still
+  // shows one visible number for the pair — the lower seq, since MapLibre's
+  // label layer places symbols in source order and hides later colliding
+  // ones — so the click should resolve to that same lower seq instead of
+  // whichever duplicate happens to be on top.
+  test("stops at identical coordinates resolve to the lower (visible) seq", () => {
+    const dup11 = { properties: { seq: 11 }, geometry: { coordinates: at(46.9) } };
+    const picked = pickClosestFeature([dup11, stop10], at(46.9));
+    assert.strictEqual(picked.properties.seq, 10, "paragens sobrepostas devem mostrar o numero visivel no mapa");
   });
 });

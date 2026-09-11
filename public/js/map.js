@@ -1135,10 +1135,31 @@
     }
   }
 
+  // When two stops sit close together, MapLibre matches all overlapping
+  // circles and lists them topmost-first — which is render order (last
+  // stop in the route), not necessarily the one nearest the click. Pick by
+  // actual distance so a click resolves to the stop the user pointed at,
+  // not whichever pin happened to be drawn on top.
+  //
+  // Two stops sharing the exact same address geocode to identical
+  // coordinates (the geocode cache is keyed by address text, see
+  // src/cache.js), so their circles fully overlap and distance can't break
+  // the tie. In that case fall back to the lowest seq — MapLibre's label
+  // layer places symbols in source order and hides later ones that collide,
+  // so the number left visible on the map is always the lower one; ties
+  // should resolve to whichever stop the user can actually see.
+  const CLICK_TIE_EPSILON_M = 0.5;
+  function pickClosestFeature(features, click) {
+    const withDistance = features.map((f) => ({ f, d: haversineMeters(click, f.geometry.coordinates) }));
+    const minD = Math.min(...withDistance.map((x) => x.d));
+    const tied = withDistance.filter((x) => x.d - minD <= CLICK_TIE_EPSILON_M).map((x) => x.f);
+    return tied.reduce((closest, f) => (f.properties.seq < closest.properties.seq ? f : closest));
+  }
+
   function onStopClick(e) {
     if (mode !== 'idle') return; // "Bloquear via" picking takes priority
-    const feature = e.features && e.features[0];
-    if (!feature) return;
+    if (!e.features || !e.features.length) return;
+    const feature = pickClosestFeature(e.features, [e.lngLat.lng, e.lngLat.lat]);
     // The stop's own coordinates, not the click's — otherwise the popup
     // anchors off-marker and reports whatever point was under the cursor.
     const [lng, lat] = feature.geometry.coordinates;
@@ -1521,7 +1542,7 @@
       const res = await fetch('/api/route', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ addresses: params.addresses, mode: 'driving', roundTrip: params.roundTrip }),
+        body: JSON.stringify({ addresses: params.addresses, mode: 'driving', roundTrip: params.roundTrip, restricted: params.restricted }),
       });
 
       if (res.status === 501) {
@@ -1536,8 +1557,23 @@
 
       const data = await res.json();
       if (!res.ok) {
+        // Without restoring display here, this message never becomes
+        // visible (it was hidden right before the fetch, same as the
+        // success path expects) — the map area is left showing whatever
+        // was on screen before, with no sign the new route failed. This is
+        // exactly what happens when a stop is only reachable via a road
+        // that's currently blocked: Valhalla returns 422 and the map
+        // silently stops updating.
+        $('mapEmptyState').style.display = '';
         $('mapEmptyState').textContent = data.error || t('mapPreviewError');
         $('stopsPanel').style.display = 'none';
+        // A failed route is exactly when the "Troços excluídos ativos"
+        // list (with its ✕ to remove one) matters most — the block that
+        // just broke the route is very likely sitting right there. Without
+        // this, the panel only ever populates on a SUCCESSFUL route, so a
+        // block that fails every route becomes impossible to remove from
+        // the UI at all.
+        await refreshActiveRestrictions();
         return;
       }
 
@@ -1713,7 +1749,7 @@
     // without a live Valhalla, so these are the parts worth pinning.
     __test: {
       buildCumulative, pointAtDistance, computeStopMarkers,
-      sliceCoordsBetween, legEndForDistance,
+      sliceCoordsBetween, legEndForDistance, pickClosestFeature,
     },
   };
 })();

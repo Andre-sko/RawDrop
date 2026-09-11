@@ -73,7 +73,11 @@ async function osrmSingleLeg(origin, destination, mode) {
   const [a, b] = await Promise.all([resolveToCoords(origin), resolveToCoords(destination)]);
   if (!a || !b) return null;
 
-  const url = `${base}/route/v1/driving/${osrmCoordString(a)};${osrmCoordString(b)}?overview=false`;
+  // The profile segment has to match `mode`, not be hardcoded — a walking
+  // request against OSRM_URL_WALKING (a SEPARATE instance, built for one
+  // profile only, see the module comment above) with "/driving/" in the
+  // path gets rejected outright (400) by instances that validate it.
+  const url = `${base}/route/v1/${mode}/${osrmCoordString(a)};${osrmCoordString(b)}?overview=false`;
   const response = await fetch(url);
   logApiRequest("osrm");
   if (!response.ok) throw new Error(`OSRM respondeu ${response.status}`);
@@ -89,10 +93,15 @@ async function osrmSingleLeg(origin, destination, mode) {
   };
 }
 
-// Full NxN duration matrix via OSRM's table service. Unlike Google there
-// are no 25x25/100-element limits to batch around and no per-element
-// cost, so the whole matrix is one request — the practical ceiling is
-// just URL length, which is why very large lists are chunked by origin.
+// Full NxN duration matrix via OSRM's table service. Unlike Google there's
+// no per-element cost, but a self-hosted OSRM instance still has a
+// --max-table-size cap (100 sources*destinations on a default build) — a
+// list past that gets the WHOLE request rejected with 400 rather than
+// silently truncated, which is why this has to chunk both dimensions the
+// same as the Google path below does for its own (smaller) per-request
+// limits. One instance in production hit exactly this at 114 addresses:
+// "OSRM respondeu 400", silently falling through to a Google fallback
+// that wasn't actually configured to work either.
 async function osrmDurationMatrix(locations, mode) {
   const base = osrmBaseUrlFor(mode);
   if (!base) return null;
@@ -106,26 +115,55 @@ async function osrmDurationMatrix(locations, mode) {
     );
   }
 
-  const coordList = coords.map(osrmCoordString).join(";");
   const durations = Array.from({ length: n }, () => new Array(n).fill(Infinity));
 
-  // OSRM's table service returns the full matrix in one go. Sources and
-  // destinations both default to "all", which is exactly what's needed.
-  const url = `${base}/table/v1/driving/${coordList}?annotations=duration`;
-  const response = await fetch(url);
-  logApiRequest("osrm");
-  if (!response.ok) throw new Error(`OSRM respondeu ${response.status}`);
-  const data = await response.json();
-  if (data.code !== "Ok" || !Array.isArray(data.durations)) {
-    throw new Error(`OSRM devolveu uma resposta inesperada (code=${data.code})`);
+  // Conservative on purpose — mirrors Google's own 10x10 chunk below (see
+  // buildDurationMatrix) rather than trying to guess this OSRM instance's
+  // actual --max-table-size. No per-element cost here, so being cautious
+  // costs a few more (parallel) local requests, not money.
+  const CHUNK = 10;
+  const allIdx = Array.from({ length: n }, (_, i) => i);
+
+  // One table request per (origin chunk, destination chunk) pair, with
+  // only THOSE points in its coordinate list — `sources`/`destinations`
+  // then index into that shorter list, not the full address list.
+  async function fetchGrid(originIdx, destIdx) {
+    const combinedIdx = Array.from(new Set([...originIdx, ...destIdx]));
+    const posInCombined = new Map(combinedIdx.map((idx, pos) => [idx, pos]));
+    const coordList = combinedIdx.map((idx) => osrmCoordString(coords[idx])).join(";");
+    const sourcesParam = originIdx.map((idx) => posInCombined.get(idx)).join(";");
+    const destParam = destIdx.map((idx) => posInCombined.get(idx)).join(";");
+
+    // Same reasoning as osrmSingleLeg for using `mode` here rather than a
+    // hardcoded profile: this was "/driving/" for every mode until it
+    // broke the first real walking-matrix request an active restriction
+    // plus a walk-only stop triggered (OSRM_URL_WALKING rejected it —
+    // that instance only serves one profile).
+    const url = `${base}/table/v1/${mode}/${coordList}?annotations=duration&sources=${sourcesParam}&destinations=${destParam}`;
+    const response = await fetch(url);
+    logApiRequest("osrm");
+    if (!response.ok) throw new Error(`OSRM respondeu ${response.status}`);
+    const data = await response.json();
+    if (data.code !== "Ok" || !Array.isArray(data.durations)) {
+      throw new Error(`OSRM devolveu uma resposta inesperada (code=${data.code})`);
+    }
+    data.durations.forEach((row, ri) => {
+      const globalI = originIdx[ri];
+      (row || []).forEach((v, ci) => {
+        durations[globalI][destIdx[ci]] = typeof v === "number" ? v : Infinity;
+      });
+    });
   }
 
-  for (let i = 0; i < n; i++) {
-    for (let j = 0; j < n; j++) {
-      const v = data.durations[i] && data.durations[i][j];
-      durations[i][j] = typeof v === "number" ? v : Infinity;
+  const requests = [];
+  for (let oStart = 0; oStart < n; oStart += CHUNK) {
+    const originChunk = allIdx.slice(oStart, oStart + CHUNK);
+    for (let dStart = 0; dStart < n; dStart += CHUNK) {
+      requests.push(fetchGrid(originChunk, allIdx.slice(dStart, dStart + CHUNK)));
     }
   }
+  await Promise.all(requests);
+
   return durations;
 }
 
@@ -262,14 +300,16 @@ async function buildDurationMatrix(locations, mode) {
   return durations;
 }
 
-// Builds the duration matrix accounting for "walk-only" addresses:
-// for any pair (i,j) where the origin OR the destination is marked
-// walk-only, it uses the walking-mode duration instead of the normal
-// van mode. Google only accepts ONE mode per request, so we build both
-// complete matrices (driving and walking) and then choose cell by cell.
-async function buildMixedDurationMatrix(locations, mode, restrictedFlags) {
-  const drivingMatrix = await buildDurationMatrix(locations, mode);
-
+// Overlays walking durations onto an already-computed driving matrix, for
+// any pair (i,j) where the origin OR the destination is marked
+// "walk-only" (van can't reach it — narrow street, stairs, dirt track,
+// see the "Endereços interditos" section of the UI). Split out from
+// buildMixedDurationMatrix so a driving matrix built some OTHER way (e.g.
+// Valhalla's, with exclude_polygons for an active road restriction — see
+// /api/optimize in server.js) can get the same walk-only treatment
+// instead of silently ignoring restrictedFlags whenever Valhalla is the
+// one computing distances.
+async function overlayWalkingMatrix(drivingMatrix, locations, restrictedFlags) {
   const anyRestricted = restrictedFlags.some(Boolean);
   if (!anyRestricted) return drivingMatrix;
 
@@ -287,6 +327,16 @@ async function buildMixedDurationMatrix(locations, mode, restrictedFlags) {
   return merged;
 }
 
+// Builds the duration matrix accounting for "walk-only" addresses:
+// for any pair (i,j) where the origin OR the destination is marked
+// walk-only, it uses the walking-mode duration instead of the normal
+// van mode. Google only accepts ONE mode per request, so we build both
+// complete matrices (driving and walking) and then choose cell by cell.
+async function buildMixedDurationMatrix(locations, mode, restrictedFlags) {
+  const drivingMatrix = await buildDurationMatrix(locations, mode);
+  return overlayWalkingMatrix(drivingMatrix, locations, restrictedFlags);
+}
+
 module.exports = {
   COORD_PAIR_RE,
   resolveToCoords,
@@ -297,5 +347,6 @@ module.exports = {
   osrmSingleLeg,
   osrmDurationMatrix,
   buildDurationMatrix,
+  overlayWalkingMatrix,
   buildMixedDurationMatrix,
 };

@@ -1485,8 +1485,14 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
     }
     const stopMinutesVal = parseFloat($('stopMinutes').value) || 0;
 
+    // Same "Endereços interditos" (secção 04) match runOptimize() sends
+    // to /api/optimize — lets the map route those stops on foot instead
+    // of failing to reach them by van (see valhallaRouteMixed in
+    // src/valhalla.js).
+    const restricted = rawAddresses.map(addr => !!findBlockedMatch(addr));
+
     await window.RouteMapUI.loadRoute({
-      addresses: locations, roundTrip, deadlines, startMinutes, stopMinutes: stopMinutesVal, optimized,
+      addresses: locations, roundTrip, deadlines, startMinutes, stopMinutes: stopMinutesVal, optimized, restricted,
       // What's actually typed in the address box (e.g. an alias name) —
       // used for every on-map display instead of `locations`, which can
       // be a bare "lat,lng" when an alias points at raw coordinates.

@@ -63,6 +63,79 @@ describe("route optimization", () => {
   });
 });
 
+describe("OSRM walk-only stops", () => {
+  // Regression: osrmSingleLeg/osrmDurationMatrix hardcoded "/driving/" in
+  // the OSRM URL regardless of `mode` — invisible as long as only driving
+  // requests were ever made, but OSRM_URL_WALKING is documented as ONE
+  // INSTANCE = ONE PROFILE (see the module comment in src/routing.js), so
+  // a walking-mode matrix request built with "/driving/" in the path gets
+  // rejected by an instance that only serves the walking profile. This
+  // only ever got exercised once "Endereços interditos" (a walk-only
+  // stop) was combined with the optimizer — surfaced as "OSRM respondeu
+  // 400" in the server log, with the whole optimize request falling back
+  // to (and depending entirely on) Google.
+  test("a walk-only stop's matrix request uses the walking profile, not driving", async () => {
+    const s = await startServer({
+      env: {
+        ROUTING_SOURCE: "osrm", GEOCODING_SOURCE: "swisstopo", APP_PASSWORD: "",
+        // Two SEPARATE single-profile instances, same as production.
+        OSRM_URL: "http://osrm-driving.test",
+        OSRM_URL_WALKING: "http://osrm-walking.test",
+      },
+      config: {
+        osrmProfileByHost: { "osrm-driving.test": "driving", "osrm-walking.test": "walking" },
+      },
+    });
+    try {
+      const res = await postJson(s.baseUrl, "/api/optimize", {
+        addresses: ["A Bern", "B Bern", "C Bern"], mode: "driving", restricted: [false, true, false],
+      });
+      assert.strictEqual(res.status, 200);
+      // If the walking leg had still requested "/driving/", the
+      // walking-only mock instance would 400 it, buildDurationMatrix
+      // would silently fall back to Google, and NO error would surface
+      // in the response — the only way to actually catch the regression
+      // is to check the server log for the fallback warning, not just
+      // that the request as a whole came back 200.
+      assert.strictEqual(
+        s.output().includes("OSRM falhou"), false,
+        "a perna a pe devia ter usado o perfil certo, sem precisar de cair para a Google"
+      );
+    } finally { await s.stop(); }
+  });
+});
+
+describe("OSRM matrix chunking", () => {
+  // Regression: osrmDurationMatrix sent the ENTIRE address list as one
+  // /table/v1 request, no matter how long — fine against Google (chunked
+  // in 10x10 blocks below) but a real self-hosted OSRM instance caps the
+  // total coordinates per table request (--max-table-size, 100 on a
+  // default build) and rejects the whole thing outright past that. Hit in
+  // production at 114 addresses: "OSRM respondeu 400", falling through to
+  // a Google fallback that wasn't even configured to work.
+  test("a list larger than OSRM's table-size limit still succeeds, chunked like Google's matrix", async () => {
+    const addresses = Array.from({ length: 25 }, (_, i) => `Rua ${i} Bern`);
+    const s = await startServer({
+      env: { ROUTING_SOURCE: "osrm", GEOCODING_SOURCE: "swisstopo", APP_PASSWORD: "" },
+      config: {
+        // The full 25-coordinate list exceeds this, but no single chunked
+        // request (worst case 10+10=20 combined origins+destinations)
+        // does — so this only passes if chunking actually happened.
+        osrmMaxTableCoords: 20,
+      },
+    });
+    try {
+      const res = await postJson(s.baseUrl, "/api/optimize", { addresses, mode: "driving" });
+      assert.strictEqual(res.status, 200);
+      assert.strictEqual(res.body.order.length, 25);
+      assert.strictEqual(
+        s.output().includes("OSRM falhou"), false,
+        "a matriz devia ter sido pedida em blocos, sem precisar de cair para a Google"
+      );
+    } finally { await s.stop(); }
+  });
+});
+
 describe("delivery deadlines", () => {
   test("reorders to avoid being late, even if total driving is longer", async () => {
     // Stop 2 is far from the start but has a tight deadline; the only way

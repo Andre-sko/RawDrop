@@ -122,7 +122,7 @@ function excludePolygonsPayload(excludePolygons) {
 // order — this does NOT reorder stops, it just routes through them in
 // the order given (reordering, when needed, is done by re-running
 // src/optimizer.js on a Valhalla-sourced matrix, then calling this).
-async function valhallaRoute(locations, { excludePolygons } = {}) {
+async function valhallaRoute(locations, { excludePolygons, costing = "auto" } = {}) {
   if (!Array.isArray(locations) || locations.length < 2) {
     throw new Error("valhallaRoute precisa de pelo menos 2 pontos");
   }
@@ -130,7 +130,7 @@ async function valhallaRoute(locations, { excludePolygons } = {}) {
 
   const data = await valhallaFetch("/route", {
     locations: coords.map((c) => ({ lat: c.lat, lon: c.lng })),
-    costing: "auto",
+    costing,
     shape_format: "polyline6",
     exclude_polygons: excludePolygonsPayload(excludePolygons),
   });
@@ -166,6 +166,55 @@ async function valhallaRoute(locations, { excludePolygons } = {}) {
   };
 }
 
+// Stitches several single-leg valhallaRoute() results (one per
+// consecutive stop pair) back into the same shape a single multi-stop
+// call returns. Used by valhallaRouteMixed() below.
+function combineLegRoutes(legRoutes) {
+  const legs = legRoutes.map((r) => r.legs[0]);
+  const fullCoordinates = legs.reduce((acc, leg, i) => {
+    const coords = leg.geometry.coordinates;
+    return acc.concat(i === 0 ? coords : coords.slice(1));
+  }, []);
+  const distanceMeters = legs.reduce((sum, l) => sum + l.distanceMeters, 0);
+  const durationSeconds = legs.reduce((sum, l) => sum + l.durationSeconds, 0);
+  const stops = [legRoutes[0].stops[0], ...legRoutes.map((r) => r.stops[1])];
+
+  return {
+    geometry: { type: "LineString", coordinates: fullCoordinates },
+    distanceMeters,
+    distanceText: formatMetersText(distanceMeters),
+    durationSeconds,
+    durationText: formatSecondsText(durationSeconds),
+    legs,
+    stops,
+  };
+}
+
+// Like valhallaRoute(), but routes leg-by-leg instead of one whole-trip
+// call, switching any leg touching a "walk-only" stop (secção 04,
+// "Endereços interditos" — van can't reach it, see
+// src/routeGeometry.js's pointInsidePolygon doc comment) to pedestrian
+// costing with no exclude_polygons: a road restriction keeps vans out,
+// not pedestrians, so walking is exactly what gets a driver past it.
+// Every other leg still gets Valhalla's normal driving costing, exclude
+// polygons included, same as valhallaRoute(). Requested one leg at a
+// time (in parallel) rather than in one call because Valhalla has no way
+// to mix costing models within a single multi-stop trip request.
+async function valhallaRouteMixed(locations, restrictedFlags, { excludePolygons } = {}) {
+  const legPromises = [];
+  for (let i = 0; i < locations.length - 1; i++) {
+    const walkOnly = !!(restrictedFlags[i] || restrictedFlags[i + 1]);
+    legPromises.push(
+      valhallaRoute([locations[i], locations[i + 1]], {
+        costing: walkOnly ? "pedestrian" : "auto",
+        excludePolygons: walkOnly ? undefined : excludePolygons,
+      })
+    );
+  }
+  const legRoutes = await Promise.all(legPromises);
+  return combineLegRoutes(legRoutes);
+}
+
 // Full NxN duration matrix via Valhalla's sources_to_targets service —
 // same shape/role as osrmDurationMatrix in src/routing.js, but with
 // exclude_polygons support so a road-segment exclusion is honoured
@@ -198,5 +247,6 @@ module.exports = {
   decodePolyline6,
   toGeoJsonLineString,
   valhallaRoute,
+  valhallaRouteMixed,
   valhallaMatrix,
 };

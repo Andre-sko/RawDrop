@@ -148,4 +148,83 @@ describe("road segment exclusion (Valhalla)", () => {
       );
     } finally { await s.stop(); }
   });
+
+  // Regression: an address in "Endereços interditos" (secção 04 — van
+  // can't reach it, delivery is on foot) that ALSO happens to sit near an
+  // active road restriction used to get the restriction's exclude_polygons
+  // applied to it same as any other stop — exactly backwards, since the
+  // whole point of marking it walk-only is that the van was never going
+  // there anyway. /api/route must route that stop's legs on foot (no
+  // exclude_polygons) instead of trying to drive them.
+  test("/api/route walks a restricted stop's legs instead of applying vehicle exclusions to them", async () => {
+    const s = await startServer({ env: { VALHALLA_URL: "http://localhost:8002", APP_PASSWORD: "" } });
+    try {
+      const before = await postJson(s.baseUrl, "/api/route", { addresses: [A, B, C] });
+      const preview = await postJson(s.baseUrl, "/api/road-exclusion/preview", {
+        addresses: [A, B, C],
+        routeGeometry: ROUTE_GEOMETRY,
+        previousRoute: { distanceMeters: before.body.distanceMeters, durationSeconds: before.body.durationSeconds },
+        pointA: POINT_A,
+        pointB: POINT_B,
+      });
+      await postJson(s.baseUrl, "/api/road-exclusion/confirm", { draftRestriction: preview.body.draftRestriction });
+
+      // Without marking B restricted, the now-active A-B block makes the
+      // mock simulate a detour (every leg comes back longer) — confirms
+      // the restriction really is in force for this address list.
+      const stillDriving = await postJson(s.baseUrl, "/api/route", { addresses: [A, B, C] });
+      assert.strictEqual(stillDriving.status, 200);
+      assert.notStrictEqual(stillDriving.body.distanceMeters, before.body.distanceMeters);
+
+      // B walk-only: both its legs (A-B and B-C) should skip the
+      // exclusion entirely and come back at the mock's normal (non
+      // "detoured") per-leg distance, same as if no restriction existed.
+      const walked = await postJson(s.baseUrl, "/api/route", {
+        addresses: [A, B, C], restricted: [false, true, false],
+      });
+      assert.strictEqual(walked.status, 200);
+      assert.strictEqual(walked.body.stops.length, 3);
+      assert.strictEqual(walked.body.legs.length, 2);
+      assert.strictEqual(
+        walked.body.distanceMeters, before.body.distanceMeters,
+        "pernas a pe nao devem levar exclude_polygons — distancia devia ser igual a de antes do bloqueio"
+      );
+    } finally { await s.stop(); }
+  });
+
+  // Regression: the Valhalla-matrix branch of /api/optimize (taken
+  // whenever a road restriction is active near these addresses) applied
+  // NO walking fallback at all for "Endereços interditos" stops — only
+  // the plain (no-restriction) branch did. So a stop that is both
+  // walk-only AND sits behind an active restriction got Infinity for
+  // every leg that has to reach it, instead of the walking duration that
+  // makes it reachable.
+  test("/api/optimize gives a walk-only stop a finite duration even when Valhalla's own matrix has none", async () => {
+    const s = await startServer({ env: { VALHALLA_URL: "http://localhost:8002", APP_PASSWORD: "" } });
+    try {
+      const before = await postJson(s.baseUrl, "/api/route", { addresses: [A, B, C] });
+      const preview = await postJson(s.baseUrl, "/api/road-exclusion/preview", {
+        addresses: [A, B, C],
+        routeGeometry: ROUTE_GEOMETRY,
+        previousRoute: { distanceMeters: before.body.distanceMeters, durationSeconds: before.body.durationSeconds },
+        pointA: POINT_A,
+        pointB: POINT_B,
+      });
+      await postJson(s.baseUrl, "/api/road-exclusion/confirm", { draftRestriction: preview.body.draftRestriction });
+
+      // roundTrip pins BOTH ends (A first, C last), leaving B as the only
+      // free stop — the A-B leg the block makes Infinity is therefore
+      // unavoidable by reordering alone, so this only comes back finite
+      // if the walk-only overlay actually ran.
+      const optimized = await postJson(s.baseUrl, "/api/optimize", {
+        addresses: [A, B, C], mode: "driving", roundTrip: true, restricted: [false, true, false],
+      });
+      assert.strictEqual(optimized.status, 200);
+      assert.deepStrictEqual(optimized.body.order, [0, 1, 2]);
+      assert.ok(
+        Number.isFinite(optimized.body.optimizedSeconds),
+        "devia ser finito: a perna A-B tem de usar a duracao a pe, nao a Infinity do Valhalla"
+      );
+    } finally { await s.stop(); }
+  });
 });
