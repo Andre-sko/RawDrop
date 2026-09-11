@@ -297,6 +297,36 @@ OSRM, because it supports excluding an arbitrary polygon per request
 preview/compare/cancel flow. OSRM has no equivalent and keeps handling
 address-list optimization unaffected.
 
+### Keeping the map data current
+
+The extract is a snapshot. Roads get built, closed, renamed and
+re-numbered, and a graph built months ago will route a van down a street
+that no longer goes through. Geofabrik republishes daily:
+
+```bash
+./update-maps.sh --check   # is there a newer extract? (exit 2 = yes)
+./update-maps.sh           # download it and rebuild both engines
+```
+
+It builds into `switzerland/.update/` first and only swaps the live files
+in once the new graph has answered a real route request — so a failed or
+interrupted rebuild leaves the running router untouched. The data it
+replaces is kept until the end (`--keep-old` to keep it for good). A full
+rebuild needs ~4 GB free and takes tens of minutes; the app keeps serving
+from the current graph throughout.
+
+`segment-speed-overrides.csv`, if you have one, is carried into the new
+graph — it is hand-made data the rebuild cannot regenerate.
+
+Other flags: `--yes` (never ask, for cron), `--osrm-only`,
+`--valhalla-only`, `--url` for a different region.
+
+A monthly cron entry:
+
+```cron
+0 4 1 * * cd /path/to/route-tracker && ./update-maps.sh --yes >> /tmp/route-tracker-update.log 2>&1
+```
+
 ### Docker setup (reuses the OSRM `.osm.pbf`)
 
 ```bash
@@ -306,6 +336,7 @@ docker run -d --name valhalla -p 8002:8002 \
 ```
 
 First run builds Valhalla's tiles from the `.osm.pbf` (a few minutes).
+`./update-maps.sh` rebuilds them the same way when the extract changes.
 
 ```
 VALHALLA_URL=http://localhost:8002
@@ -434,6 +465,68 @@ settings.
 
 For production, also restrict the key by IP in Google Cloud Console
 (the IP of the server running it).
+
+## Where everything comes from
+
+Downloads and documentation for every moving part, so a future update
+doesn't start with a search.
+
+### Map data
+
+| | |
+|---|---|
+| Geofabrik extracts (the `.osm.pbf`) | https://download.geofabrik.de/ |
+| — Switzerland, the default here | https://download.geofabrik.de/europe/switzerland.html |
+| OpenStreetMap (the source data, and where to fix a wrong road) | https://www.openstreetmap.org/ |
+| How to edit OSM | https://wiki.openstreetmap.org/wiki/Beginners%27_guide |
+
+A wrong or missing road is fixed in OpenStreetMap itself; it reaches the
+routing engines on the next `./update-maps.sh` after Geofabrik picks it
+up (a day or two).
+
+### Routing engines
+
+| | |
+|---|---|
+| OSRM — project site | https://project-osrm.org/ |
+| OSRM — HTTP API reference | https://project-osrm.org/docs/v5.24.0/api/ |
+| OSRM — source and issues | https://github.com/Project-OSRM/osrm-backend |
+| OSRM — Docker image used here | https://github.com/Project-OSRM/osrm-backend/pkgs/container/osrm-backend |
+| Valhalla — documentation | https://valhalla.github.io/valhalla/ |
+| Valhalla — API reference | https://valhalla.github.io/valhalla/api/ |
+| Valhalla — source and issues | https://github.com/valhalla/valhalla |
+| Valhalla — Docker image used here (gis-ops) | https://github.com/gis-ops/docker-valhalla |
+
+The two exist side by side on purpose: OSRM does the distance matrix for
+optimization, Valhalla does the map view and road blocking
+(`exclude_polygons`). See the sections above for why.
+
+### Geocoding
+
+| | |
+|---|---|
+| swisstopo — free Swiss geocoder used first | https://api3.geo.admin.ch/services/sdiservices.html#search |
+| Google Geocoding API | https://developers.google.com/maps/documentation/geocoding |
+| Google Distance Matrix API | https://developers.google.com/maps/documentation/distance-matrix |
+| Google Cloud console (keys, quotas, billing) | https://console.cloud.google.com/google/maps-apis |
+
+### Video → Address
+
+| | |
+|---|---|
+| Anthropic API (the Claude engine) | https://docs.claude.com/en/api/overview |
+| Anthropic console (keys, usage) | https://console.anthropic.com/ |
+| Tesseract OCR (the offline engine) | https://github.com/tesseract-ocr/tesseract |
+| Tesseract language data | https://github.com/tesseract-ocr/tessdata |
+| FFmpeg (frame extraction) | https://ffmpeg.org/documentation.html |
+
+### Map rendering
+
+| | |
+|---|---|
+| MapLibre GL JS | https://maplibre.org/maplibre-gl-js/docs/ |
+| Turf.js (the geometry used for road blocking) | https://turfjs.org/ |
+| Turf.js — source and issues | https://github.com/Turfjs/turf |
 
 ## Tests
 

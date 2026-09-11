@@ -24,7 +24,7 @@
 const crypto = require("crypto");
 const fs = require("fs");
 const { DATA_DIR, ROAD_RESTRICTIONS_FILE, VALHALLA_MAX_EXCLUDE_CIRCUMFERENCE } = require("./config");
-const { polygonPerimeterMeters } = require("./routeGeometry");
+const { polygonPerimeterMeters, haversineMeters } = require("./routeGeometry");
 
 // An unreadable file is moved aside rather than started over from an
 // empty list: without this, one corrupt (or half-written) file would be
@@ -149,10 +149,36 @@ function buildExcludePolygonsPayload(activeRestrictions, { reservedMeters = 0 } 
   return { polygons, skipped };
 }
 
+// A block anywhere in the world shouldn't change how routes are computed
+// everywhere else: Valhalla's "auto" costing is more conservative than
+// OSRM's about tracks/unclassified roads (see the Verbier case that
+// motivated this — a block near Nendaz made every optimisation, even in
+// a different valley, switch engines and pick up a 3x detour that only
+// existed on Valhalla). So before a restriction is allowed to affect a
+// request, it has to actually be near it — within maxMeters of at least
+// one of the route's own points.
+const RESTRICTION_RELEVANCE_RADIUS_METERS = 5000;
+
+function restrictionMidpoint(restriction) {
+  const coords = restriction.geometry && restriction.geometry.coordinates;
+  if (!Array.isArray(coords) || coords.length === 0) return null;
+  return coords[Math.floor(coords.length / 2)]; // [lng, lat]
+}
+
+function restrictionsNear(points, restrictions, maxMeters = RESTRICTION_RELEVANCE_RADIUS_METERS) {
+  if (!Array.isArray(points) || points.length === 0) return [];
+  return restrictions.filter((r) => {
+    const mid = restrictionMidpoint(r);
+    if (!mid) return false;
+    return points.some((p) => haversineMeters(p, mid) <= maxMeters);
+  });
+}
+
 module.exports = {
   createRestriction,
   listActiveRestrictions,
   listAllRestrictions,
   deactivateRestriction,
   buildExcludePolygonsPayload,
+  restrictionsNear,
 };

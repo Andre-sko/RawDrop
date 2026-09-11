@@ -29,25 +29,37 @@ const {
   loadCache, saveCache, geocodeCache, distanceCache,
   geocodeCacheKey, distanceCacheKey, getFromCache, summariseCache,
 } = require("./src/cache");
-const { optimizeOrder, computeLatenessReport } = require("./src/optimizer");
+const { optimizeOrder, computeLatenessReport, routeSeconds, unreachableStops } = require("./src/optimizer");
 const {
   API_LOG_FILE, apiLog, todayKey, logApiRequest, buildCostEstimate,
 } = require("./src/api-log");
 const { geocodeAddressBest } = require("./src/geocoding");
-const { osrmSingleLeg, buildMixedDurationMatrix } = require("./src/routing");
+const { osrmSingleLeg, buildMixedDurationMatrix, resolveToCoords } = require("./src/routing");
 const { valhallaRoute, valhallaMatrix, ValhallaNoRouteError } = require("./src/valhalla");
 const {
   snapPointToRoute, sliceRouteBetween, bufferSegment, trimSegmentToLength,
-  polygonPerimeterMeters, lineLengthMeters,
+  polygonPerimeterMeters, lineLengthMeters, pointInsidePolygon,
 } = require("./src/routeGeometry");
 const {
   createRestriction, listActiveRestrictions, listAllRestrictions,
-  deactivateRestriction, buildExcludePolygonsPayload,
+  deactivateRestriction, buildExcludePolygonsPayload, restrictionsNear,
 } = require("./src/roadRestrictions");
+
+// Resolves addresses to [lng, lat] points, skipping any that fail to
+// geocode — used only to decide which restrictions are geographically
+// relevant to a request, never to build the actual route (each engine
+// still resolves addresses itself, from cache, so this costs nothing
+// extra in practice).
+async function resolveAddressPoints(addresses) {
+  const coords = await Promise.all(addresses.map((a) => resolveToCoords(a).catch(() => null)));
+  return coords.filter(Boolean).map((c) => [c.lng, c.lat]);
+}
 const {
   UPLOAD_DIR, VIDEO_EXT_REGEX, OCR_LANG_BY_UI_LANG,
   extractStopsFromVideoAI, extractStopsFromImageAI,
   extractStopsFromVideo, extractStopsFromImage,
+  countDuplicates,
+  markGeocodedDuplicates,
 } = require("./src/ocr");
 
 const app = express();
@@ -1121,32 +1133,71 @@ app.post("/api/extract-addresses", upload.single("media"), async (req, res) => {
 
     // Validates each address found against Google (same logic used
     // throughout the rest of the app), and attaches that info to each stop.
-    const candidates = [];
-    for (const stop of extraction.stops) {
+    //
+    // Only FIRST occurrences are geocoded and the answer is copied onto
+    // their duplicates: a video of a scrolling stop list reads the same
+    // address five or ten times over, and paying Google once per repeat
+    // would multiply the bill for an answer we already have.
+    const rawStops = extraction.rawStops || [];
+    const geoByIndex = new Map();
+    for (let i = 0; i < rawStops.length; i++) {
+      if (rawStops[i].duplicateOf != null) continue;
       let geo = null;
       try {
-        geo = await geocodeAddressBest(stop.address);
+        geo = await geocodeAddressBest(rawStops[i].address);
       } catch (err) {
         geo = null;
       }
-      candidates.push({
-        raw: stop.address,
-        stopNumber: stop.stopNumber,
-        readings: stop.readings,
-        ocrConfidence: stop.confidence, // "alta" | "media" | "baixa" (high | medium | low)
+      geoByIndex.set(i, geo);
+    }
+
+    const geocodedStops = rawStops.map((stop, i) => {
+      const geo = geoByIndex.get(stop.duplicateOf != null ? stop.duplicateOf : i) || null;
+      return {
+        ...stop,
         valid: !!(geo && geo.hasStreetPrecision),
         formattedAddress: geo ? geo.formattedAddress : undefined,
         placeId: geo ? geo.placeId : undefined,
         lat: geo ? geo.lat : undefined,
         lng: geo ? geo.lng : undefined,
-      });
-    }
+      };
+    });
+
+    // Second pass, now that Google has spoken: two readings it resolved
+    // to the same place are the same door, whatever four-word Swiss
+    // address the OCR made of them. This is what catches the repeats the
+    // similarity score is too coarse to pair up.
+    const markedStops = markGeocodedDuplicates(geocodedStops);
+
+    // Kept for anything still reading the old field: the same list with
+    // the marked repeats left out. Derived from markedStops rather than
+    // geocoded again, so it costs nothing.
+    const candidates = markedStops
+      .filter((stop) => stop.duplicateOf == null)
+      .map((stop) => ({
+        raw: stop.address,
+        stopNumber: stop.stopNumber,
+        readings: stop.readings,
+        ocrConfidence: stop.confidence, // "alta" | "media" | "baixa" (high | medium | low)
+        valid: stop.valid,
+        formattedAddress: stop.formattedAddress,
+        placeId: stop.placeId,
+        lat: stop.lat,
+        lng: stop.lng,
+      }));
 
     res.json({
       engine,
+      rawStops: markedStops,
+      duplicateCount: countDuplicates(markedStops),
+      // The thresholds the marking above used, so the page can re-mark
+      // the list itself after a correction comes back without guessing
+      // at values the server picked.
+      dedupeOptions: extraction.dedupeOptions || {},
       candidates,
       rawText: extraction.rawText || "",
       framesProcessed: extraction.totalFrames,
+      framesAvailable: extraction.framesAvailable,
       totalReadings: extraction.totalReadings,
       failedBatches: extraction.failedBatches || 0,
     });
@@ -1193,14 +1244,37 @@ app.post("/api/optimize", async (req, res) => {
     const activeRestrictions = listActiveRestrictions();
     let durations;
     if (activeRestrictions.length > 0 && VALHALLA_URL) {
-      const { polygons } = buildExcludePolygonsPayload(activeRestrictions);
-      durations = await valhallaMatrix(addresses, { excludePolygons: polygons });
+      const points = await resolveAddressPoints(addresses);
+      const relevant = restrictionsNear(points, activeRestrictions);
+      if (relevant.length > 0) {
+        const { polygons } = buildExcludePolygonsPayload(relevant);
+        durations = await valhallaMatrix(addresses, { excludePolygons: polygons });
+      } else {
+        durations = await buildMixedDurationMatrix(addresses, mode || "driving", restrictedFlags);
+      }
     } else {
       durations = await buildMixedDurationMatrix(addresses, mode || "driving", restrictedFlags);
     }
     const order = optimizeOrder(durations, !!roundTrip, { deadlines: deadlineArr, startMinutes: startMin, stopMinutes: stopMin });
     const lateStops = computeLatenessReport(order, durations, deadlineArr, startMin, stopMin);
-    res.json({ order, lateStops });
+
+    // What the reorder actually bought, measured on the matrix the
+    // optimizer worked from. Reported rather than left implicit: the app
+    // silently rewrote the list and the only way to tell whether that
+    // helped was to eyeball the total before and after — and if those
+    // two numbers ever disagree with these, the disagreement is the bug
+    // worth chasing, not the optimizer.
+    const given = durations.map((_, i) => i);
+    const givenSeconds = routeSeconds(durations, given);
+    const optimizedSeconds = routeSeconds(durations, order);
+
+    res.json({
+      order,
+      lateStops,
+      givenSeconds,
+      optimizedSeconds,
+      savedSeconds: givenSeconds - optimizedSeconds,
+    });
   } catch (err) {
     res.status(500).json({ error: err.message || "Falha ao otimizar a rota" });
   }
@@ -1231,7 +1305,8 @@ const MAX_CLICK_TO_ROUTE_METERS = 60;
 // Returns full route geometry (for the map) for the given stops IN THE
 // GIVEN ORDER — this does not reorder anything, it just draws the route
 // through the addresses as given. All currently active road
-// restrictions are applied automatically.
+// restrictions NEAR THESE ADDRESSES are applied automatically (a block
+// on the other side of the country has no business shaping this route).
 app.post("/api/route", async (req, res) => {
   if (!VALHALLA_URL) {
     return res.status(501).json({ error: MAP_NOT_CONFIGURED_MESSAGE });
@@ -1243,7 +1318,9 @@ app.post("/api/route", async (req, res) => {
   }
 
   try {
-    const { polygons, skipped } = buildExcludePolygonsPayload(listActiveRestrictions());
+    const points = await resolveAddressPoints(addresses);
+    const relevantRestrictions = restrictionsNear(points, listActiveRestrictions());
+    const { polygons, skipped } = buildExcludePolygonsPayload(relevantRestrictions);
     const route = await valhallaRoute(addresses, { excludePolygons: polygons });
     // Reported rather than swallowed: a block that isn't being applied
     // means the map would otherwise route through a road it draws as
@@ -1332,9 +1409,13 @@ app.post("/api/road-exclusion/preview", async (req, res) => {
     }
 
     // The new block goes in first so it always applies; older ones fill
-    // whatever circumference budget is left after reserving its own.
+    // whatever circumference budget is left after reserving its own —
+    // but only the ones actually near these addresses compete for it, so
+    // an unrelated block elsewhere can't crowd out one that matters here.
+    const points = await resolveAddressPoints(addresses);
+    const relevantRestrictions = restrictionsNear(points, listActiveRestrictions());
     const { polygons: activePolygons, skipped } = buildExcludePolygonsPayload(
-      listActiveRestrictions(),
+      relevantRestrictions,
       { reservedMeters: polygonPerimeterMeters(excludePolygon) }
     );
     const allExcludePolygons = [excludePolygon, ...activePolygons];
@@ -1347,12 +1428,27 @@ app.post("/api/road-exclusion/preview", async (req, res) => {
     const order = optimizeOrder(matrix, !!roundTrip, { deadlines: deadlineArr, startMinutes: startMin, stopMinutes: stopMin });
 
     // If the best order still has to cross a pair the exclusion made
-    // impossible, there simply is no valid alternative — surface that
-    // clearly instead of handing back a broken/incomplete route.
+    // impossible, there is no valid alternative — but "no alternative
+    // found" on its own reads as "the map is wrong" and leaves the
+    // driver nothing to do about it. Nearly always the block has sealed
+    // off a specific delivery: the buffered segment covers the last
+    // piece of road to its door, and then no detour exists for that
+    // stop however well the driver knows the area. Name it, and say
+    // whether the new block is what did it, so the answer is "move the
+    // block off number 47" instead of a dead end.
     const isImpossible = order.some((idx, i) => i > 0 && matrix[order[i - 1]][idx] === Infinity);
     if (isImpossible) {
+      const stranded = unreachableStops(matrix, { lastIsFinal: !roundTrip });
+      const details = stranded.map((idx) => ({
+        index: idx,
+        address: addresses[idx],
+        // Inside the segment the driver just drew, as opposed to cut off
+        // by a block saved earlier — a different thing to fix.
+        insideNewBlock: pointInsidePolygon(points[idx], excludePolygon),
+      }));
       return res.status(422).json({
         error: "Nao foi encontrada uma rota alternativa valida para este troco.",
+        unreachable: details,
       });
     }
 

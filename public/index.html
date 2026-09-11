@@ -204,18 +204,29 @@ Torre de Belém, Lisboa"></textarea>
           <div id="mapToolbar" class="map-toolbar" style="display:none;">
             <button class="map-tool-btn active" id="mapToolSelect" type="button" data-i18n="mapToolSelect">✋ Selecionar</button>
             <button class="map-tool-btn" id="mapToolExclude" type="button" data-i18n="mapToolExclude">🚧 Bloquear via</button>
-            <button class="map-tool-btn" id="mapToolRevert" type="button" style="display:none;" data-i18n="mapToolRevert">↩️ Reverter bloqueio</button>
             <button class="map-tool-btn" id="mapToolAnimate" type="button" data-i18n="mapToolAnimate">▶️ Animar rota</button>
-            <button class="map-tool-btn" id="mapToolAnimateStop" type="button" style="display:none;" data-i18n="mapToolAnimateStop">⏹️ Parar animação</button>
+            <div id="pinStyleGroup" style="display:none;gap:8px;">
+              <button class="map-tool-btn" id="pinStyleClassic" type="button" data-pin-style="classic" data-i18n="pinStyleClassic">Clássico</button>
+              <button class="map-tool-btn" id="pinStyleModern" type="button" data-pin-style="modern" data-i18n="pinStyleModern">Moderno</button>
+            </div>
             <div class="anim-speed-group" id="animSpeedGroup" style="display:none;">
               <button class="anim-speed-btn" data-speed="0.5" type="button">0.5x</button>
               <button class="anim-speed-btn active" data-speed="1" type="button">1x</button>
               <button class="anim-speed-btn" data-speed="2" type="button">2x</button>
               <button class="anim-speed-btn" data-speed="4" type="button">4x</button>
             </div>
+            <button class="map-tool-btn" id="mapToolAnimatePlay" type="button" style="display:none;" data-i18n="mapToolAnimatePlay">▶ Play</button>
+            <button class="map-tool-btn" id="mapToolAnimateStop" type="button" style="display:none;" data-i18n="mapToolAnimateStop">⏹️ Parar animação</button>
+            <button class="map-tool-btn" id="mapToolPreOptimize" type="button" disabled data-i18n="mapToolPreOptimize">Ver rota antes da otimização</button>
           </div>
           <div id="mapHint" class="map-hint" style="display:none;"></div>
           <div id="mapContainer" style="display:none;"></div>
+          <div id="mapStyleGroup" class="map-style-group" style="display:none;">
+            <button class="map-style-btn" id="mapStyleDark" type="button" data-style="dark" data-i18n="mapStyleDark">Escuro</button>
+            <button class="map-style-btn" id="mapStyleLight" type="button" data-style="light" data-i18n="mapStyleLight">Minimalista</button>
+            <button class="map-style-btn" id="mapStyleSatellite" type="button" data-style="satellite" data-i18n="mapStyleSatellite">Satélite</button>
+            <button class="map-style-btn" id="mapStyleTopo" type="button" data-style="topo" data-i18n="mapStyleTopo">Topográfico</button>
+          </div>
           <div id="mapEmptyState" class="empty-state" data-i18n="mapEmptyState">Calcula uma rota para a veres no mapa.</div>
           <div id="mapComparisonPanel" class="map-comparison-panel" style="display:none;"></div>
           <div id="activeRestrictionsSection" style="display:none;">
@@ -315,6 +326,7 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
 </div>
 
 <script src="/js/translations.js"></script>
+<script src="/js/stop-dedupe.js"></script>
 <script src="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.js"></script>
 <script src="/js/map.js"></script>
 <script>
@@ -421,11 +433,12 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
     } else if(filtered.length === 0){
       box.innerHTML = `<div class="list-empty">${t('noResults')}</div>`;
     } else {
-      filtered.forEach((a) => {
+      filtered.forEach((a, i) => {
         const idx = aliases.indexOf(a); // real index, to remove correctly even when filtered
         const row = document.createElement('div');
-        row.className = 'alias-list-item';
+        row.className = 'alias-list-item numbered';
         row.innerHTML = `
+          <span class="num">${i + 1}</span>
           <div>
             <div class="from">${escapeHtml(a.from)}</div>
             <div class="to">→ ${escapeHtml(a.to)}</div>
@@ -462,6 +475,15 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
   }
 
   // ---------- Alias address picker ----------
+  // Shared by refreshAliasPicker/refreshBlockedPicker/refreshDeliveryTimePicker
+  // — same "pick an address already in the list" dropdown, just filling a
+  // different target field each time. Options are labelled with the
+  // stop's position (matching the numbering everywhere else addresses are
+  // listed); the value stays the plain address string.
+  function addressPickerOptionsHtml(addrs){
+    return addrs.map((a,i) => `<option value="${escapeHtml(a)}">${i+1}. ${escapeHtml(a)}</option>`).join('');
+  }
+
   function refreshAliasPicker(){
     const picker = $('aliasPicker');
     const current = picker.value;
@@ -469,8 +491,7 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
       .split(/\r?\n/)
       .map(l=>l.trim())
       .filter(l=>l.length>0 && !l.startsWith('#'));
-    picker.innerHTML = `<option value="">${t('aliasPickerDefault')}</option>` +
-      addrs.map(a => `<option value="${escapeHtml(a)}">${escapeHtml(a)}</option>`).join('');
+    picker.innerHTML = `<option value="">${t('aliasPickerDefault')}</option>` + addressPickerOptionsHtml(addrs);
     if(addrs.includes(current)) picker.value = current;
   }
   $('addressList').addEventListener('focus', refreshAliasPicker);
@@ -610,11 +631,12 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
     } else if(filtered.length === 0){
       box.innerHTML = `<div class="list-empty">${t('noResults')}</div>`;
     } else {
-      filtered.forEach((b) => {
+      filtered.forEach((b, i) => {
         const idx = blocked.indexOf(b); // real index, to remove correctly even when filtered
         const row = document.createElement('div');
-        row.className = 'alias-list-item';
+        row.className = 'alias-list-item numbered';
         row.innerHTML = `
+          <span class="num">${i + 1}</span>
           <div>
             <div class="from">🚫 ${escapeHtml(b.address)}</div>
             ${b.reason ? `<div class="to">${escapeHtml(b.reason)}</div>` : ''}
@@ -654,8 +676,7 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
       .split(/\r?\n/)
       .map(l=>l.trim())
       .filter(l=>l.length>0 && !l.startsWith('#'));
-    picker.innerHTML = `<option value="">${t('aliasPickerDefault')}</option>` +
-      addrs.map(a => `<option value="${escapeHtml(a)}">${escapeHtml(a)}</option>`).join('');
+    picker.innerHTML = `<option value="">${t('aliasPickerDefault')}</option>` + addressPickerOptionsHtml(addrs);
     if(addrs.includes(current)) picker.value = current;
   }
   $('blockedPicker').addEventListener('focus', refreshBlockedPicker);
@@ -749,8 +770,7 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
       .split(/\r?\n/)
       .map(l=>l.trim())
       .filter(l=>l.length>0 && !l.startsWith('#'));
-    picker.innerHTML = `<option value="">${t('aliasPickerDefault')}</option>` +
-      addrs.map(a => `<option value="${escapeHtml(a)}">${escapeHtml(a)}</option>`).join('');
+    picker.innerHTML = `<option value="">${t('aliasPickerDefault')}</option>` + addressPickerOptionsHtml(addrs);
     if(addrs.includes(current)) picker.value = current;
   }
   $('deliveryTimePicker').addEventListener('focus', refreshDeliveryTimePicker);
@@ -1288,7 +1308,7 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
     return { addresses: stops, deadlines: stopDeadlines, roundTrip: false };
   }
 
-  async function runCalculate(){
+  async function runCalculate(optimized = false){
     clearStatus();
     const { addresses: rawAddresses, deadlines, roundTrip } = buildTextAddresses();
     const startTime = $('startTime').value;
@@ -1436,7 +1456,7 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
     btn.disabled = false;
     btn.textContent = t('calcBtnText');
     refreshCacheStats(); // a rota que acabou de correr provavelmente adicionou entradas
-    loadRouteOnMap(); // não bloqueia o resto do fluxo — o mapa é só um extra visual
+    loadRouteOnMap(optimized); // não bloqueia o resto do fluxo — o mapa é só um extra visual
   }
 
   // ---------- Map (route display + "Excluir troço") ----------
@@ -1444,7 +1464,10 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
   // to /api/optimize (resolved locations, deadlines, roundTrip, start/stop
   // minutes) and hands it to map.js, which owns everything about
   // MapLibre and the /api/route + /api/road-exclusion/* calls from here on.
-  async function loadRouteOnMap(){
+  // `optimized` just tells map.js whether this route is the result of
+  // "Reorganizar rota" / applying an alternative (vs. a plain recalculation),
+  // so its "Moderno" pin style can distinguish before/after optimizing.
+  async function loadRouteOnMap(optimized = false){
     if(!window.RouteMapUI) return;
     const { addresses: rawAddresses, deadlines, roundTrip } = buildTextAddresses();
     if(rawAddresses.length < 2){ window.RouteMapUI.clear(); return; }
@@ -1463,7 +1486,11 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
     const stopMinutesVal = parseFloat($('stopMinutes').value) || 0;
 
     await window.RouteMapUI.loadRoute({
-      addresses: locations, roundTrip, deadlines, startMinutes, stopMinutes: stopMinutesVal,
+      addresses: locations, roundTrip, deadlines, startMinutes, stopMinutes: stopMinutesVal, optimized,
+      // What's actually typed in the address box (e.g. an alias name) —
+      // used for every on-map display instead of `locations`, which can
+      // be a bare "lat,lng" when an alias points at raw coordinates.
+      labels: rawAddresses,
     });
   }
 
@@ -1482,11 +1509,11 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
     refreshAliasPicker();
     refreshBlockedPicker();
     showStatus(t('optimizeReorderedInfo'), 'info');
-    await runCalculate(); // já chama loadRouteOnMap() no fim
+    await runCalculate(true); // já chama loadRouteOnMap() no fim
   }
   window.applyReorderedRoute = applyReorderedRoute;
 
-  $('calcBtn').addEventListener('click', runCalculate);
+  $('calcBtn').addEventListener('click', () => runCalculate());
 
   // ---------- Share / copy Google Maps link ----------
   // If there's an alias coordinate, the link uses it directly (already
@@ -1891,6 +1918,17 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
         triggerBtn.disabled = false;
         triggerBtn.textContent = originalLabel;
       } else {
+        // Snapshot the order exactly as it stood right before this
+        // reorder — no server round trip needed here, just the plain
+        // request shape "Ver rota antes da otimização" will send to
+        // /api/route itself, lazily, the first time it's clicked.
+        if(window.RouteMapUI){
+          window.RouteMapUI.setPreOptimizeSnapshot({
+            addresses: locations, roundTrip, deadlines: deadlines.slice(), startMinutes, stopMinutes: stopMinutesVal,
+            labels: rawAddresses.slice(),
+          });
+        }
+
         // Rebuild each line preserving its "| HH:MM" deadline suffix
         // (buildTextAddresses stripped it out into the parallel
         // "deadlines" array — has to go back in, or reordering would
@@ -1907,12 +1945,20 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
         refreshAliasPicker();
         refreshBlockedPicker();
 
+        // Say what the reorder bought, in minutes of driving, straight
+        // from the matrix the optimizer used. "Reordenada" on its own
+        // left no way to tell a good reorder from a pointless one.
+        const savedMin = typeof data.savedSeconds === 'number' ? Math.round(data.savedSeconds / 60) : null;
         if(data.lateStops && data.lateStops.length > 0){
           showStatus(t('optimizeLateWarning', {count: data.lateStops.length}), 'error');
+        } else if(savedMin != null && savedMin > 0){
+          showStatus(t('optimizeSavedInfo', {minutes: savedMin}), 'ok');
+        } else if(savedMin != null){
+          showStatus(t('optimizeNoGainInfo'), 'info');
         } else {
           showStatus(t('optimizeReorderedInfo'), 'info');
         }
-        await runCalculate(); // automatically recalculate with the new order
+        await runCalculate(true); // automatically recalculate with the new order
       }
     } catch(err){
       showStatus(t('serverContactError'), 'error');
@@ -1941,7 +1987,46 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
 
   // ---------- Video/Photo → Address ----------
   let selectedMediaFile = null;
-  let lastVideoResults = null;
+  let lastVideoResults = null;   // last /api/extract-addresses payload — kept for the counters and raw OCR text
+
+  // videoRawStops is THE list: every address read, in frame order,
+  // repeats included and only marked. Nothing below ever removes an
+  // entry from it — hiding repeats is a class on a row, and a correction
+  // coming back overwrites an entry in place. That is what lets the
+  // "Remover endereços repetidos" checkbox be toggled back and forth
+  // without another server call and without losing edits or ticks.
+  let videoRawStops = [];
+  let videoDedupeOptions = {};    // thresholds the server marked with, reused when re-marking here
+  let videoSelection = new Set(); // indices with the row checkbox ticked
+  let videoHideDuplicates = false;
+
+  // Address text -> queue of videoRawStops indices it came from. Filled
+  // when rows are sent over to the address-correction tab, drained when
+  // the check runs there, and what makes it possible to put a fixed
+  // address back exactly where it was read instead of appending it to
+  // the end of a list. Declared here, with the list it points into,
+  // rather than next to the correction code that drains it — that code
+  // sits further down the file than the handlers that fill it.
+  const verifyOriginQueue = new Map();
+
+  const VIDEO_STATE_CLASS = {
+    'unique': '',
+    'scroll-duplicate': 'state-scroll-dup',
+    'real-duplicate': 'state-real-dup',
+    'low-confidence': 'state-low-conf',
+  };
+
+  function videoStopState(stop){
+    return StopDedupe.classifyStop(stop, videoRawStops, videoDedupeOptions);
+  }
+  // What the row shows: Google's tidy version when it confirmed the
+  // address, otherwise exactly what was read (or last corrected).
+  function videoDisplayAddress(stop){
+    return (stop.valid && stop.formattedAddress) ? stop.formattedAddress : stop.address;
+  }
+  function videoVisibleIndices(){
+    return StopDedupe.visibleIndices(videoRawStops, { hideDuplicates: videoHideDuplicates });
+  }
 
   function updateFileDropText(){
     const el = $('videoFileText');
@@ -2011,12 +2096,11 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
     }
   }
 
-  function renderVideoResults(data){
-    lastVideoResults = data;
+  function renderVideoResults(){
     const area = $('videoResultsArea');
-    const candidates = data.candidates || [];
+    const data = lastVideoResults || {};
 
-    if(candidates.length === 0){
+    if(videoRawStops.length === 0){
       let diagnosis = '';
       if(typeof data.totalReadings === 'number'){
         diagnosis = data.totalReadings > 0
@@ -2032,29 +2116,82 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
       return;
     }
 
+    const duplicateCount = StopDedupe.countDuplicates(videoRawStops);
+    const visible = videoVisibleIndices();
+    // A batch of frames that failed every retry is a piece of the video
+    // nobody read. Saying so is the difference between a driver checking
+    // the tail of the list against the app and one trusting a list that
+    // quietly stops halfway.
+    // The video had more to show than the budget could read. Not an
+    // error — the list is good as far as it goes — but the driver has to
+    // know it may not go all the way.
+    const capped = (data.framesAvailable > data.framesProcessed)
+      ? `<div class="status-banner warning" style="margin-bottom:12px;">${t('videoCappedWarning', {processed: data.framesProcessed, available: data.framesAvailable})}</div>`
+      : '';
+    const incomplete = data.failedBatches > 0
+      ? `<div class="status-banner warning" style="margin-bottom:12px;">${t('videoIncompleteWarning', {batches: data.failedBatches, frames: data.failedFrames || 0})}</div>`
+      : '';
+
     let html = `
       <div class="block-label" style="margin-top:24px; margin-bottom:12px;">
         <span class="num">→</span> ${t('videoResultsTitle')}
       </div>
-      <div style="display:flex; gap:8px; margin-bottom:14px;">
+      ${capped}${incomplete}
+      <div class="video-legend">
+        <span class="video-legend-item state-unique"><span class="video-legend-swatch"></span>${t('videoLegendUnique')}</span>
+        <span class="video-legend-item state-scroll-dup"><span class="video-legend-swatch"></span>${t('videoLegendScrollDup')}</span>
+        <span class="video-legend-item state-real-dup"><span class="video-legend-swatch"></span>${t('videoLegendRealDup')}</span>
+        <span class="video-legend-item state-low-conf"><span class="video-legend-swatch"></span>${t('videoLegendLowConf')}</span>
+      </div>
+      <div style="display:flex; gap:8px; margin-bottom:10px;">
         <button class="btn-ghost" id="addAllToRouteBtn" style="flex:1;">${t('videoAddAllBtn')}</button>
-        <button class="btn-ghost" id="sendVideoToVerifyBtn" style="flex:1;">${t('sendToVerifyBtn')}</button>
+        <button class="btn-ghost" id="sendVideoToVerifyBtn" style="flex:1;">${t('videoSendSelectedToVerify')}</button>
+      </div>
+      <div class="video-selection-bar">
+        <button class="btn-ghost" id="videoSelectAllBtn">${t('videoSelectAll')}</button>
+        <button class="btn-ghost" id="videoSelectNoneBtn">${t('videoSelectNone')}</button>
+        ${videoHideDuplicates ? '' : `<button class="btn-ghost" id="videoSelectDupsBtn">${t('videoSelectDuplicates')}</button>`}
+        <span class="video-selection-count" id="videoSelectionCount"></span>
       </div>
     `;
 
-    candidates.forEach((c, idx)=>{
-      const displayAddress = c.valid ? c.formattedAddress : c.raw;
-      const ocrBadgeClass = { alta: 'ocr-high', media: 'ocr-medium', baixa: 'ocr-low' }[c.ocrConfidence] || '';
-      const ocrBadgeText = c.ocrConfidence ? t(`videoOcrConfidence_${c.ocrConfidence}`) : '';
+    visible.forEach((idx)=>{
+      const c = videoRawStops[idx];
+      const state = videoStopState(c);
+      const stateClass = VIDEO_STATE_CLASS[state] || '';
+      const displayAddress = videoDisplayAddress(c);
+      const ocrBadgeClass = { alta: 'ocr-high', media: 'ocr-medium', baixa: 'ocr-low' }[c.confidence] || '';
+      const ocrBadgeText = c.confidence ? t(`videoOcrConfidence_${c.confidence}`) : '';
+      // Rows are numbered by their position in the FULL list, not by
+      // where they land after filtering — that number is what
+      // "repete a linha N" points at, and it has to keep meaning the
+      // same thing whether repeats are showing or not.
+      const dupLabel = c.duplicateOf != null
+        ? t('videoDuplicateOfLabel', {num: c.duplicateOf + 1, percent: Math.round((c.similarity || 0) * 100)})
+        : '';
+      // Not a repeat: a second parcel to a door already on the list.
+      // It keeps its own row because it is its own delivery — the label
+      // is there so the driver carries both up the same stairs.
+      const sameAddrLabel = c.sameAddressAs != null
+        ? t('videoSameAddressLabel', {num: c.sameAddressAs + 1})
+        : '';
+
       html += `
-        <div class="video-result-card ${c.valid ? '' : 'invalid'}">
-          <div>
-            <span class="video-result-badge ${c.valid ? '' : 'invalid'}">${c.valid ? t('videoValidBadge') : t('videoInvalidBadge')}</span>
-            ${c.ocrConfidence ? `<span class="video-result-badge ocr-badge ${ocrBadgeClass}">${ocrBadgeText}</span>` : ''}
+        <div class="video-result-card ${stateClass} ${c.valid ? '' : 'invalid'} ${videoSelection.has(idx) ? 'selected' : ''}" data-idx="${idx}">
+          <label class="video-result-select">
+            <input type="checkbox" class="video-select-check" data-idx="${idx}" ${videoSelection.has(idx) ? 'checked' : ''} />
+          </label>
+          <div class="video-result-main">
+            ${c.corrected
+              ? `<span class="video-result-badge corrected-badge">${t('videoCorrectedBadge')}</span>`
+              : `<span class="video-result-badge ${c.valid ? '' : 'invalid'}">${c.valid ? t('videoValidBadge') : t('videoInvalidBadge')}</span>`}
+            ${c.confidence ? `<span class="video-result-badge ocr-badge ${ocrBadgeClass}">${ocrBadgeText}</span>` : ''}
+            ${dupLabel ? `<span class="video-result-badge dup-badge">${dupLabel}</span>` : ''}
+            ${sameAddrLabel ? `<span class="video-result-badge same-addr-badge">${sameAddrLabel}</span>` : ''}
             ${c.stopNumber ? `<div class="video-result-stop">${t('videoStopLabel', {num: c.stopNumber})}</div>` : ''}
             <div class="video-result-address">${escapeHtml(displayAddress)}</div>
-            ${c.valid && c.raw !== c.formattedAddress ? `<div class="video-result-raw">OCR: ${escapeHtml(c.raw)}</div>` : ''}
-            ${c.readings > 1 ? `<div class="video-result-raw">${t('videoReadingsCount', {count: c.readings})}</div>` : ''}
+            ${c.valid && c.address !== c.formattedAddress ? `<div class="video-result-raw">OCR: ${escapeHtml(c.address)}</div>` : ''}
+            ${typeof c.frame === 'number' ? `<div class="video-result-raw">${t('videoFrameLabel', {num: c.frame + 1})}</div>` : ''}
           </div>
           <div class="video-result-actions">
             <button class="btn-ghost copy-result-btn" data-idx="${idx}" style="font-size:11px; padding:6px 10px;">${t('videoCopyAddress')}</button>
@@ -2064,6 +2201,21 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
       `;
     });
 
+    html += `
+      <div class="video-filter-hint" style="margin-top:10px;">
+        ${t('videoDiagnostics', {
+          frames: data.framesProcessed == null ? '?' : data.framesProcessed,
+          readings: data.totalReadings == null ? '?' : data.totalReadings,
+          rows: videoRawStops.length - duplicateCount,
+        })}
+      </div>
+      <label class="video-filter-row" for="videoHideDupsCheck">
+        <input type="checkbox" id="videoHideDupsCheck" ${videoHideDuplicates ? 'checked' : ''} />
+        <span>${t('videoHideDuplicates')}</span>
+        <span class="video-filter-hint">${t('videoDuplicateCount', {count: duplicateCount})}</span>
+      </label>
+    `;
+
     if(data.rawText){
       html += `
         <div class="raw-text-toggle" id="rawTextToggle">${t('videoShowRawText')}</div>
@@ -2072,35 +2224,112 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
     }
 
     area.innerHTML = html;
+    updateVideoSelectionCount();
+
+    // Ticking a row only repaints that row and the counter. Re-rendering
+    // the whole list on every tick would throw away the scroll position
+    // halfway down a fifty-stop list, which is precisely where the
+    // ticking happens.
+    area.querySelectorAll('.video-select-check').forEach(cb=>{
+      cb.addEventListener('change', ()=>{
+        const idx = parseInt(cb.getAttribute('data-idx'),10);
+        if(cb.checked) videoSelection.add(idx); else videoSelection.delete(idx);
+        const card = cb.closest('.video-result-card');
+        if(card) card.classList.toggle('selected', cb.checked);
+        updateVideoSelectionCount();
+      });
+    });
+
+    // "Select all" means one row per ADDRESS, never one per reading. A
+    // scroll reads the same door five or ten times over — on a real
+    // route, 193 readings for 114 addresses — and ticking all 193 sent
+    // the same address to the correction tab again and again, which is
+    // exactly the pile the marking exists to spare the driver. The
+    // repeats stay in the list, they just do not get ticked.
+    const selectAllBtn = $('videoSelectAllBtn');
+    if(selectAllBtn) selectAllBtn.addEventListener('click', ()=>{
+      videoRawStops.forEach((stop, i)=>{ if(stop.duplicateOf == null) videoSelection.add(i); });
+      renderVideoResults();
+    });
+    const selectNoneBtn = $('videoSelectNoneBtn');
+    if(selectNoneBtn) selectNoneBtn.addEventListener('click', ()=>{
+      videoSelection.clear();
+      renderVideoResults();
+    });
+    const selectDupsBtn = $('videoSelectDupsBtn');
+    if(selectDupsBtn) selectDupsBtn.addEventListener('click', ()=>{
+      videoSelection.clear();
+      videoRawStops.forEach((stop, i)=>{ if(stop.duplicateOf != null) videoSelection.add(i); });
+      renderVideoResults();
+    });
+
+    const hideDupsCheck = $('videoHideDupsCheck');
+    if(hideDupsCheck) hideDupsCheck.addEventListener('change', ()=>{
+      // Pure view filter: videoRawStops is untouched, no server call,
+      // and both the ticks and any corrections already applied are still
+      // there when it gets unchecked again.
+      videoHideDuplicates = hideDupsCheck.checked;
+      // Ticks on rows that just went behind the filter are dropped: an
+      // invisible tick still counts in the counter and still travels to
+      // the correction tab, which is a nasty surprise on a list the
+      // driver believes is down to one line per address. Unchecking
+      // shows every reading again, untouched — only the selection
+      // narrows, never the list.
+      if(videoHideDuplicates){
+        const stillVisible = new Set(videoVisibleIndices());
+        Array.from(videoSelection).forEach(i => { if(!stillVisible.has(i)) videoSelection.delete(i); });
+      }
+      renderVideoResults();
+    });
 
     area.querySelectorAll('.copy-result-btn').forEach(btn=>{
       btn.addEventListener('click', ()=>{
-        const c = candidates[parseInt(btn.getAttribute('data-idx'),10)];
-        handleCopyAddress(c.valid ? c.formattedAddress : c.raw, btn);
+        const c = videoRawStops[parseInt(btn.getAttribute('data-idx'),10)];
+        handleCopyAddress(videoDisplayAddress(c), btn);
       });
     });
     area.querySelectorAll('.add-result-btn').forEach(btn=>{
       btn.addEventListener('click', ()=>{
-        const c = candidates[parseInt(btn.getAttribute('data-idx'),10)];
-        addAddressToRoute(c.valid ? c.formattedAddress : c.raw, btn);
+        const c = videoRawStops[parseInt(btn.getAttribute('data-idx'),10)];
+        addAddressToRoute(videoDisplayAddress(c), btn);
       });
     });
+
     const addAllBtn = $('addAllToRouteBtn');
     if(addAllBtn){
       addAllBtn.addEventListener('click', ()=>{
-        candidates.forEach(c => addAddressToRoute(c.valid ? c.formattedAddress : c.raw, null));
+        // One line per DOOR, whatever the filter is showing. A route is
+        // a list of places to drive to, so a door read seven times by a
+        // slow scroll is one line, and the second parcel to a building
+        // already on the list does not add a second drive there either —
+        // it is the same address, and the row in the video list is what
+        // tells the driver to carry two parcels up.
+        const jaAdicionados = new Set();
+        videoRawStops.forEach((stop, i)=>{
+          if(stop.duplicateOf != null) return;
+          const address = videoDisplayAddress(stop);
+          const key = address.trim().toLowerCase();
+          if(jaAdicionados.has(key)) return;
+          jaAdicionados.add(key);
+          addAddressToRoute(address, null);
+        });
         addAllBtn.textContent = t('videoAddedToRoute');
         addAllBtn.disabled = true;
+        // Straight to the route, the same way the correction hand-off
+        // lands on the correction tab: the work continues there, and
+        // leaving the driver on the video tab wondering whether anything
+        // happened is the one thing this button must not do. The
+        // per-row button deliberately does NOT do this — picking a
+        // handful of addresses one by one would jump away on the first.
+        switchToTab('route');
       });
     }
+
     const sendVideoToVerifyBtn = $('sendVideoToVerifyBtn');
     if(sendVideoToVerifyBtn){
-      sendVideoToVerifyBtn.addEventListener('click', ()=>{
-        const list = candidates.map(c => c.valid ? c.formattedAddress : c.raw);
-        appendToVerifyTextarea(list.join('\n'));
-        switchToTab('verify');
-      });
+      sendVideoToVerifyBtn.addEventListener('click', ()=> sendSelectedVideoStopsToVerify());
     }
+
     const rawToggle = $('rawTextToggle');
     if(rawToggle){
       rawToggle.addEventListener('click', ()=>{
@@ -2110,6 +2339,39 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
         rawToggle.textContent = isHidden ? t('videoHideRawText') : t('videoShowRawText');
       });
     }
+  }
+
+  function updateVideoSelectionCount(){
+    const el = $('videoSelectionCount');
+    if(el) el.textContent = t('videoSelectionCount', {count: videoSelection.size});
+  }
+
+  // Hands the ticked rows to the address-correction tool that already
+  // exists (the "Corrigir Endereços" tab -> POST /api/verify-addresses).
+  // Nothing is re-implemented here: the only thing added on top of the
+  // existing appendToVerifyTextarea + switchToTab pair is the trail of
+  // where each line came from, so the fixed address can be put back at
+  // the right index instead of arriving as an anonymous list.
+  function sendSelectedVideoStopsToVerify(){
+    const payload = StopDedupe.buildCorrectionPayload(videoRawStops, videoSelection, videoDisplayAddress);
+    if(payload.length === 0){
+      showVideoStatus(t('videoNoSelectionError'), 'error');
+      return;
+    }
+    clearVideoStatus();
+
+    // The textarea is free text the driver can edit before checking, so
+    // the origin can't be a line number. Queueing the indices per address
+    // and consuming them in order survives edits and reordering, and
+    // keeps two identical addresses pointing at their own rows.
+    payload.forEach(({ index, address })=>{
+      const key = address.trim();
+      if(!verifyOriginQueue.has(key)) verifyOriginQueue.set(key, []);
+      verifyOriginQueue.get(key).push(index);
+    });
+
+    appendToVerifyTextarea(payload.map(p => p.address).join('\n'));
+    switchToTab('verify');
   }
 
   // Wraps a multipart upload in XMLHttpRequest instead of fetch, since
@@ -2141,6 +2403,10 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
 
     clearVideoStatus();
     $('videoResultsArea').innerHTML = '';
+    videoRawStops = [];
+    videoSelection = new Set();
+    videoHideDuplicates = false;
+    verifyOriginQueue.clear();
 
     const btn = $('extractBtn');
     btn.disabled = true;
@@ -2187,7 +2453,10 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
           const engineLabel = data.engine === 'ai' ? t('engineOptionAIShort') : t('engineOptionLocalShort');
           showVideoStatus(t('videoFramesProcessedWithEngine', {count: data.framesProcessed, engine: engineLabel}), 'ok');
         }
-        renderVideoResults(data);
+        lastVideoResults = data;
+        videoRawStops = data.rawStops || [];
+        videoDedupeOptions = data.dedupeOptions || {};
+        renderVideoResults();
       }
     } catch(err){
       showVideoStatus(t('videoErrorPrefix', {msg: t('serverContactError')}), 'error');
@@ -2201,6 +2470,8 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
 
   // ---------- Fix Addresses ----------
   let lastVerifyResults = null; // stores the results so they can be re-rendered (e.g. on language switch)
+
+  let verifyOrigins = new Map(); // verify result index -> videoRawStops index
 
   $('verifyFileInput').addEventListener('change', (e)=>{
     const file = e.target.files[0];
@@ -2216,6 +2487,8 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
     $('verifyResultsArea').innerHTML = '';
     verifyManualEdits = {};
     lastVerifyResults = null;
+    verifyOriginQueue.clear();
+    verifyOrigins = new Map();
     clearVerifyStatus();
   });
 
@@ -2309,6 +2582,7 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
     html += `
       <div class="verify-final-actions">
         <button class="btn-primary" id="verifyApplyToRouteBtn">${t('verifyApplyToRouteBtn')}</button>
+        ${verifyOrigins.size > 0 ? `<button class="btn-ghost" id="verifyBackToVideoBtn">${t('verifyBackToVideoBtn')}</button>` : ''}
         <button class="btn-ghost" id="verifyExportBtn">${t('verifyExportBtn')}</button>
         <button class="btn-share-qr" id="verifyExportQrBtn" title="${t('qrShareBtnTitle')}">📱</button>
       </div>
@@ -2376,12 +2650,40 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
       });
     }
 
+    const backToVideoBtn = $('verifyBackToVideoBtn');
+    if(backToVideoBtn) backToVideoBtn.addEventListener('click', ()=>{
+      const finalList = buildFinalList();
+      const corrections = [];
+      verifyOrigins.forEach((originIndex, idx)=>{
+        const r = results[idx];
+        if(!r) return;
+        // Only a suggestion Google actually stood behind counts as
+        // confirmed. A line typed by hand is taken as written but stays
+        // unconfirmed — the tool has no idea whether it resolves.
+        const confirmed = !verifyManualEdits[idx] && (r.status === 'match' || r.status === 'correction');
+        corrections.push({ index: originIndex, address: finalList[idx], valid: confirmed });
+      });
+
+      // Marking is recomputed over the WHOLE list, not just the
+      // corrected rows: fixing a misread street can turn a row that
+      // looked unique into an obvious repeat of another one, and the
+      // reverse happens just as often.
+      videoRawStops = StopDedupe.applyCorrections(videoRawStops, corrections, videoDedupeOptions);
+      showVerifyStatus(t('verifyBackToVideoDone', {count: corrections.length}), 'ok');
+      renderVideoResults();
+      switchToTab('video');
+    });
+
     $('verifyApplyToRouteBtn').addEventListener('click', ()=>{
       const finalList = buildFinalList();
       $('addressList').value = finalList.join('\n');
       refreshAliasPicker();
       refreshBlockedPicker();
       showVerifyStatus(t('verifyAppliedToRoute'), 'ok');
+      // The corrected list now lives on the Route tab, so that is where
+      // the driver has to be looking. Staying here reads as a button
+      // that did nothing — and the next move is to press it again.
+      switchToTab('route');
     });
 
     $('verifyExportBtn').addEventListener('click', async ()=>{
@@ -2412,6 +2714,18 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
       showVerifyStatus(t('verifyNoAddressesError'), 'error');
       return;
     }
+
+    // Drain the queue against the lines actually submitted. A line the
+    // driver typed by hand, or one that came from the Route tab, simply
+    // finds nothing queued and gets no origin — it still gets checked,
+    // it just has nowhere to go back to.
+    verifyOrigins = new Map();
+    const pending = new Map();
+    verifyOriginQueue.forEach((indices, key)=> pending.set(key, indices.slice()));
+    addresses.forEach((address, i)=>{
+      const queue = pending.get(address.trim());
+      if(queue && queue.length) verifyOrigins.set(i, queue.shift());
+    });
 
     const btn = $('verifyBtn');
     btn.disabled = true;
@@ -2510,7 +2824,7 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
     applyTheme(currentTheme); // re-traduz o título do botão de tema
     updateFileDropText();
     rerenderRouteResults();
-    if(lastVideoResults) renderVideoResults(lastVideoResults);
+    if(videoRawStops.length) renderVideoResults();
     if(lastVerifyResults) renderVerifyResults(lastVerifyResults);
     if(window.RouteMapUI) window.RouteMapUI.retranslate();
     clearStatus();

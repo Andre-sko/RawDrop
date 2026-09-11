@@ -12,6 +12,7 @@
 const nearestPointOnLine = require("@turf/nearest-point-on-line").default;
 const lineSlice = require("@turf/line-slice").default;
 const buffer = require("@turf/buffer").default;
+const booleanPointInPolygon = require("@turf/boolean-point-in-polygon").default;
 const { lineString: toLineString, point: toPoint, feature: toFeature } = require("@turf/helpers");
 
 // routeLine: GeoJSON LineString geometry. clickPoint: [lng, lat].
@@ -125,10 +126,30 @@ function trimSegmentToLength(lineStringGeometry, maxMeters, anchorPoint) {
   return { type: "LineString", coordinates: [pointAt(from)].concat(middle, [pointAt(to)]) };
 }
 
+// Is a resolved stop inside an excluded polygon? Used to tell "your
+// block covers this delivery's own doorstep" apart from "this delivery
+// was already cut off by something else", which need different fixes.
+// A point we could not resolve counts as outside: guessing that a stop
+// is walled in, on no evidence, would send the driver to move a block
+// that was never the problem.
+function pointInsidePolygon(point, polygon) {
+  if (!point || !polygon) return false;
+  const lng = typeof point.lng === "number" ? point.lng : point.lon;
+  const lat = point.lat;
+  if (typeof lng !== "number" || typeof lat !== "number") return false;
+  try {
+    return booleanPointInPolygon([lng, lat], polygon);
+  } catch (err) {
+    return false;
+  }
+}
+
 module.exports = {
+  pointInsidePolygon,
   snapPointToRoute,
   sliceRouteBetween,
   bufferSegment,
+  haversineMeters,
   lineLengthMeters,
   polygonPerimeterMeters,
   trimSegmentToLength,

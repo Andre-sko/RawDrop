@@ -1,6 +1,6 @@
-// Unit tests for the pure geometry/permutation helpers in
-// public/js/map.js — the ones the map UI leans on for "how far along the
-// route is X", which leg a click belongs to, and how to undo a reorder.
+// Unit tests for the pure geometry helpers in public/js/map.js — the
+// ones the map UI leans on for "how far along the route is X" and which
+// leg a click belongs to.
 //
 // These matter more than usual because the map view itself can't run
 // without a live Valhalla instance, so nothing else in this suite ever
@@ -25,7 +25,7 @@ function loadMapHelpers() {
 
 const {
   buildCumulative, pointAtDistance, computeStopMarkers,
-  sliceCoordsBetween, invertOrder, legEndForDistance,
+  sliceCoordsBetween, legEndForDistance,
 } = loadMapHelpers();
 
 // ~111 km per degree of latitude, so 0.001° is ~111 m. Routes below are
@@ -186,42 +186,5 @@ describe("legEndForDistance", () => {
       legEndForDistance(offset, 50), 1,
       "um clique antes da primeira paragem tem de bloquear o primeiro troco"
     );
-  });
-});
-
-describe("invertOrder", () => {
-  // The invariant the "Reverter bloqueio" button depends on: applying an
-  // order and then its inverse has to give back the original list. If
-  // this is wrong, reverting a block silently scrambles the stops.
-  const applyOrder = (list, order) => order.map((i) => list[i]);
-  const roundTrips = (list, order) =>
-    assert.deepStrictEqual(applyOrder(applyOrder(list, order), invertOrder(order)), list);
-
-  test("identity order is its own inverse", () => {
-    assert.deepStrictEqual(invertOrder([0, 1, 2, 3]), [0, 1, 2, 3]);
-  });
-
-  test("round-trips a simple swap", () => {
-    roundTrips(["A", "B", "C"], [0, 2, 1]);
-  });
-
-  test("round-trips a 3-cycle", () => {
-    roundTrips(["A", "B", "C", "D"], [0, 2, 3, 1]);
-  });
-
-  test("round-trips a full reversal", () => {
-    roundTrips(["A", "B", "C", "D", "E"], [4, 3, 2, 1, 0]);
-  });
-
-  test("round-trips every permutation of five stops", () => {
-    const list = ["A", "B", "C", "D", "E"];
-    const permute = (xs) =>
-      xs.length <= 1 ? [xs] : xs.flatMap((x, i) => permute([...xs.slice(0, i), ...xs.slice(i + 1)]).map((p) => [x, ...p]));
-    for (const order of permute([0, 1, 2, 3, 4])) roundTrips(list, order);
-  });
-
-  test("the inverse is a real permutation (no holes, no duplicates)", () => {
-    const inverse = invertOrder([3, 0, 4, 1, 2]);
-    assert.deepStrictEqual([...inverse].sort((a, b) => a - b), [0, 1, 2, 3, 4]);
   });
 });

@@ -7,3 +7,25 @@ todo.txt
 CHEATSHEET.md
 Route Tracker Logo.png
 Route Tracker Logo 2.png
+
+# Ruflo local secrets and runtime data
+.env.local
+.env.*.local
+
+# Agent tooling — local setup and runtime state, not part of the app.
+# None of this was ever committed; it just kept showing up in git status.
+# Databases and logs are machine-specific and change on every run; the
+# config and skills are this machine's assistant setup rather than
+# something the project needs to build or run.
+.claude/
+.claude-flow/
+.agents/
+.swarm/
+.mcp.json
+CLAUDE.md
+ruvector.db
+
+# Editor leftovers (nano/vim swap files, backups)
+*.swp
+*.swo
+*~

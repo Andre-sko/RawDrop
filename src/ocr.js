@@ -4,10 +4,12 @@
 // list of a delivery app) or a photo, extracts frames with ffmpeg, runs
 // OCR with tesseract on each one, identifies lines that look like a
 // Swiss/European address ("Street ... number, postal code City"), and
-// groups repeated readings of the SAME stop (which appears in several
-// frames during scrolling) to produce a clean, deduplicated list with a
-// confidence indicator. Each final address is then validated against
-// the Google Geocoding API, the same as everywhere else in the app.
+// keeps EVERY reading, in the order it came off the frames, marking the
+// ones that repeat an earlier one instead of discarding them (a stop
+// appears in several frames during scrolling — but so does a second
+// parcel going to the same building, and the read cannot tell those
+// apart). Each distinct address is then validated against the Google
+// Geocoding API, the same as everywhere else in the app.
 //
 // Uses the SYSTEM ffmpeg and tesseract binaries (lighter and much
 // faster than the equivalent npm packages) — that's why they need to
@@ -20,6 +22,18 @@ const os = require("os");
 const path = require("path");
 const { spawn } = require("child_process");
 const { anthropic, ANTHROPIC_MODEL } = require("./config");
+// The duplicate marking lives in public/js/ so the browser can load the
+// very same file: the page has to re-mark the list after an address
+// comes back corrected, and two copies of this logic would drift.
+const {
+  DUPLICATE_SIMILARITY,
+  NEAR_FRAME_DISTANCE,
+  tokenize,
+  jaccardSimilarity,
+  markDuplicates,
+  markGeocodedDuplicates,
+  countDuplicates,
+} = require("../public/js/stop-dedupe.js");
 
 const UPLOAD_DIR = path.join(os.tmpdir(), "route-tracker-uploads");
 fs.mkdirSync(UPLOAD_DIR, { recursive: true });
@@ -45,7 +59,16 @@ const MAX_FRAMES = 40;
 // Limit for the AI (Claude) engine: each frame is just a light API
 // call (doesn't weigh on local CPU/memory), so the limit can be much
 // higher — here the real concern is cost/time, not the VM.
-const MAX_FRAMES_AI = 200;
+const MAX_FRAMES_AI = 400;
+
+// How many sequential frames go into one AI call. Deliberately small (5,
+// no more) — larger batches risk overwhelming the model with too many
+// images at once and hurting reading reliability instead of improving
+// it. It doubles as the frame-distance scale for the AI engine: readings
+// are attributed to the batch they came from, so two ADJACENT batches
+// are already FRAME_BATCH_SIZE apart even when the frames themselves
+// were neighbours.
+const FRAME_BATCH_SIZE = 8;
 
 // ---------- low-level utilities ----------
 
@@ -68,28 +91,6 @@ function runCommand(cmd, args) {
       resolve({ stdout, stderr });
     });
   });
-}
-
-function tokenize(str) {
-  return new Set(
-    str
-      .toLowerCase()
-      .normalize("NFD")
-      .replace(/[\u0300-\u036f]/g, "") // strip accents
-      .replace(/[^a-z0-9 ]/g, " ")
-      .split(/\s+/)
-      .filter(Boolean)
-  );
-}
-
-function jaccardSimilarity(a, b) {
-  const ta = tokenize(a);
-  const tb = tokenize(b);
-  if (ta.size === 0 || tb.size === 0) return 0;
-  let inter = 0;
-  for (const t of ta) if (tb.has(t)) inter++;
-  const union = new Set([...ta, ...tb]).size;
-  return inter / union;
 }
 
 // Picks at most maxCount elements from "items", spread evenly
@@ -226,69 +227,46 @@ function parseFrameText(text) {
   return out;
 }
 
-// ---------- step 4: deduplication across frames ----------
+// ---------- step 4: the FULL list, in reading order ----------
 
-function dedupeReadings(readings) {
-  // group by stop number when available (more reliable signal);
-  // the rest groups by similarity to the closest address already seen.
-  const groups = new Map();
+// The list the interface actually works from. It throws nothing away
+// (the dedupe pass that used to sit here did): every reading stays, in the order
+// it came off the frames, and repeats are only ANNOTATED. Deciding what
+// to do with a repeat is the driver's call, not ours — a video of a stop
+// list scrolling past looks exactly like a video of two parcels going to
+// the same building, and only the person who packed the van can tell
+// them apart.
+function buildRawStops(readings, options) {
+  const marked = markDuplicates(readings, options);
 
-  function addTo(group, reading) {
-    const existing = group.candidates.find((c) => c.address === reading.address);
-    if (existing) existing.count++;
-    else group.candidates.push({ address: reading.address, count: 1 });
-  }
-
-  for (const r of readings) {
-    if (r.stopNumber != null) {
-      const key = `n:${r.stopNumber}`;
-      if (!groups.has(key)) groups.set(key, { stopNumber: r.stopNumber, candidates: [] });
-      addTo(groups.get(key), r);
-      continue;
-    }
-    let bestKey = null;
-    let bestScore = 0;
-    for (const [key, g] of groups) {
-      for (const c of g.candidates) {
-        const score = jaccardSimilarity(c.address, r.address);
-        if (score > bestScore) {
-          bestScore = score;
-          bestKey = key;
-        }
-      }
-    }
-    if (bestScore >= 0.6 && bestKey) {
-      addTo(groups.get(bestKey), r);
-    } else {
-      const key = `u:${groups.size}`;
-      groups.set(key, { stopNumber: null, candidates: [] });
-      addTo(groups.get(key), r);
-    }
-  }
-
-  const results = [];
-  for (const g of groups.values()) {
-    g.candidates.sort((a, b) => b.count - a.count);
-    const best = g.candidates[0];
-    const totalReadings = g.candidates.reduce((s, c) => s + c.count, 0);
-    const confidence = g.stopNumber != null && totalReadings >= 2 ? "alta" : totalReadings >= 2 ? "media" : "baixa";
-
-    results.push({
-      stopNumber: g.stopNumber,
-      address: best.address,
-      readings: totalReadings,
-      confidence,
-    });
-  }
-
-  results.sort((a, b) => {
-    if (a.stopNumber != null && b.stopNumber != null) return a.stopNumber - b.stopNumber;
-    if (a.stopNumber != null) return -1;
-    if (b.stopNumber != null) return 1;
-    return 0;
+  // How many readings ended up in each group, counting the first
+  // occurrence itself — the same "read N times" signal the old dedupe
+  // used to derive its confidence, so a single stray reading still reads
+  // as doubtful and one seen across several frames does not.
+  const groupSize = new Map();
+  marked.forEach((entry, i) => {
+    const root = entry.duplicateOf == null ? i : entry.duplicateOf;
+    groupSize.set(root, (groupSize.get(root) || 0) + 1);
   });
 
-  return results;
+  return marked.map((entry, i) => {
+    const root = entry.duplicateOf == null ? i : entry.duplicateOf;
+    const total = groupSize.get(root) || 1;
+    return {
+      address: entry.address,
+      stopNumber: entry.stopNumber == null ? null : entry.stopNumber,
+      frame: entry.frame,
+      readings: total,
+      // The AI engine sets its own confidence (it has no per-frame vote
+      // to count); the local engine gets it from how often the group was read.
+      confidence: entry.confidence
+        || (entry.stopNumber != null && total >= 2 ? "alta" : total >= 2 ? "media" : "baixa"),
+      duplicateOf: entry.duplicateOf,
+      similarity: entry.similarity,
+      matchedBy: entry.matchedBy,
+      sameAddressAs: entry.sameAddressAs,
+    };
+  });
 }
 
 // =========================================================================
@@ -302,16 +280,69 @@ function dedupeReadings(readings) {
 // needs internet and spends Anthropic API calls.
 // =========================================================================
 
+// Runs a call again when it throws, with a growing wait in between.
+//
+// A batch of frames that fails is five frames' worth of stops gone, and
+// the reasons it fails are almost always the ones that pass on their own
+// a second later: a rate limit, an overloaded API, a dropped connection.
+// Before this, the first error threw the batch away for good — on a long
+// video that is how a route comes back half its length, with nothing on
+// screen to say so.
+//
+// sleep is injectable so the retry logic can be tested without the test
+// suite actually waiting.
+async function withRetry(fn, options) {
+  const opts = options || {};
+  const attempts = opts.attempts == null ? 3 : opts.attempts;
+  const baseDelayMs = opts.baseDelayMs == null ? 1500 : opts.baseDelayMs;
+  const sleep = opts.sleep || ((ms) => new Promise((resolve) => setTimeout(resolve, ms)));
+
+  let lastError = null;
+  for (let attempt = 0; attempt < attempts; attempt++) {
+    try {
+      return await fn();
+    } catch (err) {
+      lastError = err;
+      if (attempt < attempts - 1) await sleep(baseDelayMs * Math.pow(2, attempt));
+    }
+  }
+  throw lastError;
+}
+
+// The ffmpeg call that turns the video into frames for the AI engine,
+// as an array so it can be read in a test without running anything.
+//
+// mpdecimate is what earns its place here. A stop list being filmed sits
+// still for long stretches — the driver holds the phone, reads, scrolls a
+// bit, holds again — and every one of those still frames used to be
+// sampled, sent, and paid for while showing nothing the frame before it
+// had not. On a real route that swallowed roughly half the frame budget,
+// and the stops that scrolled past in the parts that were thinned out
+// were never read at all. Dropping near-identical frames spends the
+// budget on the parts of the video where the list is actually moving.
+//
+// The thresholds are deliberately timid (a frame is kept as soon as a
+// twentieth of its blocks move): a scroll of even a couple of pixels
+// changes every block that holds text, so scrolling frames are always
+// kept, and only a screen that is genuinely standing still is dropped.
+//
+// -vsync vfr is not optional: without it the image muxer fills the gaps
+// back in with copies of the frames mpdecimate just dropped.
+function buildAiFrameArgs({ videoPath, pattern, fps = 2, maxWidth = 900 }) {
+  return [
+    "-v", "error",
+    "-i", videoPath,
+    "-vf", `fps=${fps},scale=${maxWidth}:-1,mpdecimate=hi=64*8:lo=64*3:frac=0.05`,
+    "-vsync", "vfr",
+    "-q:v", "4",
+    pattern,
+  ];
+}
+
 async function extractFramesForAI(videoPath, outDir, { fps = 2, maxWidth = 900 } = {}) {
   await fs.promises.mkdir(outDir, { recursive: true });
   const pattern = path.join(outDir, "f_%04d.jpg");
-  await runCommand("ffmpeg", [
-    "-v", "error",
-    "-i", videoPath,
-    "-vf", `scale=${maxWidth}:-1,fps=${fps}`,
-    "-q:v", "4",
-    pattern,
-  ]);
+  await runCommand("ffmpeg", buildAiFrameArgs({ videoPath, pattern, fps, maxWidth }));
   return (await fs.promises.readdir(outDir))
     .filter((f) => f.endsWith(".jpg"))
     .sort()
@@ -322,11 +353,13 @@ const AI_FRAME_PROMPT = `Estas a ver uma captura de ecra de uma app de entregas 
 
 Extrai APENAS os enderecos postais de entrega visiveis na imagem: nome da rua, numero, codigo postal e cidade.
 
+Extrai TAMBEM o numero da paragem de cada endereco — o numero que aparece antes do destinatario, no formato "12." no inicio da linha. E o que identifica cada paragem sem ambiguidade. Se nao conseguires ler o numero de uma paragem, poe null; nunca o inventes nem o deduzas pela ordem.
+
 NAO incluas nomes de destinatarios, nomes de empresas, pesos, janelas horarias, ou qualquer outro texto.
 
 Se um endereco estiver cortado no topo ou no fundo do ecra e parecer incompleto, ignora-o (vai aparecer completo noutro frame).
 
-Responde APENAS com um array JSON de strings, sem markdown, sem texto adicional. Cada string no formato "Nome da Rua Numero, Codigo Postal Cidade". Se nao houver nenhum endereco completo visivel, responde [].`;
+Responde APENAS com um array JSON, sem markdown, sem texto adicional, em que cada elemento e {"stop": <numero da paragem ou null>, "address": "Nome da Rua Numero, Codigo Postal Cidade"}. Se nao houver nenhum endereco completo visivel, responde [].`;
 
 // Prompt for when we send SEVERAL frames in the same call (instead of
 // one at a time, in isolation). This gives Claude context between
@@ -336,15 +369,73 @@ Responde APENAS com um array JSON de strings, sem markdown, sem texto adicional.
 // together in a normal conversation.
 const AI_BATCH_PROMPT = `Estas a ver varias capturas de ecra SEQUENCIAIS (por esta ordem) de uma app de entregas, tiradas durante um scroll continuo pela lista de paragens. Como e scroll, e normal a mesma paragem aparecer repetida em mais do que uma imagem.
 
-Extrai TODOS os enderecos postais de entrega distintos visiveis em qualquer uma das imagens: rua, numero, codigo postal, cidade.
+Extrai TODAS as paragens visiveis em qualquer uma das imagens. De cada paragem tira duas coisas:
+- o numero da paragem: o numero que aparece antes do destinatario, no formato "12." no inicio da linha;
+- o endereco postal: rua, numero de porta, codigo postal, cidade.
+
+Se nao conseguires ler o numero de uma paragem, poe null. NUNCA o inventes nem o deduzas pela ordem em que aparece.
 
 NAO incluas nomes de destinatarios, nomes de empresas, pesos, janelas horarias, ou qualquer outro texto.
 
-Ja podes deduplicar aqui: se o mesmo endereco aparecer em mais do que uma imagem desta sequencia, inclui-o so uma vez na resposta.
+Deduplica por NUMERO DA PARAGEM, nunca pelo endereco: se a mesma paragem aparecer em mais do que uma imagem desta sequencia (o scroll faz isso o tempo todo), inclui-a so uma vez. ATENCAO: duas paragens diferentes no mesmo endereco sao normais — duas encomendas para o mesmo predio — e tem numeros diferentes. Nesse caso inclui as DUAS, cada uma com o seu numero. So a repeticao da mesma paragem e que se descarta.
 
 Se um endereco estiver cortado no topo ou no fundo de uma imagem e parecer incompleto, tenta completa-lo usando a imagem anterior ou seguinte desta mesma sequencia (normalmente aparece inteiro numa delas, por causa do scroll). So ignora se mesmo assim nao conseguires ler um endereco completo em nenhuma das imagens.
 
-Responde APENAS com um array JSON de strings, sem markdown, sem texto adicional. Cada string no formato "Nome da Rua Numero, Codigo Postal Cidade". Se nao houver nenhum endereco completo visivel, responde [].`;
+Escreve cada endereco sempre da mesma maneira ao longo de toda a resposta (a mesma rua nao pode aparecer abreviada numa linha e por extenso noutra).
+
+Responde APENAS com um array JSON, sem markdown, sem texto adicional, em que cada elemento e {"stop": <numero da paragem ou null>, "address": "Nome da Rua Numero, Codigo Postal Cidade"}. Se nao houver nenhuma paragem legivel, responde [].`;
+
+// What comes back from a reading call: one entry per stop, each with the
+// number printed next to it when it could be read.
+//
+// Tolerant on purpose. The response is asked for as
+// {"stop": n, "address": "..."} but a model that answers with a plain
+// string, or in the Portuguese key names the prompt itself uses, is
+// giving a perfectly good answer in a slightly different envelope, and
+// throwing that away would cost a whole batch of frames. What is NOT
+// tolerated is a made-up stop number: anything that is not an integer
+// becomes null, and the address then has to stand on its own.
+function parseAiStopList(text) {
+  var out = [];
+  for (const item of parseJsonArrayRaw(text)) {
+    let address = null;
+    let stopNumber = null;
+
+    if (typeof item === "string") {
+      address = item;
+    } else if (item && typeof item === "object") {
+      const rawAddress = item.address != null ? item.address : (item.endereco != null ? item.endereco : item.morada);
+      if (typeof rawAddress === "string") address = rawAddress;
+      const rawStop = item.stop != null ? item.stop : (item.paragem != null ? item.paragem : item.numero);
+      if (Number.isInteger(rawStop)) stopNumber = rawStop;
+      else if (typeof rawStop === "string" && /^\d+$/.test(rawStop.trim())) stopNumber = parseInt(rawStop, 10);
+    }
+
+    if (typeof address !== "string" || !address.trim()) continue;
+    out.push({ address: address.trim(), stopNumber });
+  }
+  return out;
+}
+
+// The JSON array itself, however the model wrapped it — shared by the
+// string form and the stop-list form so both survive markdown fences and
+// a sentence of preamble the same way.
+function parseJsonArrayRaw(text) {
+  const cleaned = String(text == null ? "" : text).replace(/```json|```/g, "").trim();
+  try {
+    const parsed = JSON.parse(cleaned);
+    if (Array.isArray(parsed)) return parsed;
+  } catch (e) {
+    const match = cleaned.match(/\[[\s\S]*\]/);
+    if (match) {
+      try {
+        const parsed = JSON.parse(match[0]);
+        if (Array.isArray(parsed)) return parsed;
+      } catch (e2) { /* ignora, devolve [] abaixo */ }
+    }
+  }
+  return [];
+}
 
 function parseJsonArraySafe(text) {
   const cleaned = text.replace(/```json|```/g, "").trim();
@@ -384,7 +475,7 @@ async function extractAddressesFromFrameAI(framePath) {
   });
 
   const text = response.content.map((b) => (b.type === "text" ? b.text : "")).join("");
-  return parseJsonArraySafe(text);
+  return parseAiStopList(text);
 }
 
 // Reads a BATCH of sequential frames in the same call — gives
@@ -411,7 +502,7 @@ async function extractAddressesFromFrameBatchAI(framePaths) {
   });
 
   const text = response.content.map((b) => (b.type === "text" ? b.text : "")).join("");
-  return parseJsonArraySafe(text);
+  return parseAiStopList(text);
 }
 
 const AI_CONSOLIDATE_PROMPT_HEADER = `Abaixo esta uma lista bruta de enderecos extraidos por IA a partir de muitos frames sobrepostos do mesmo video (uma lista de paragens de entrega a fazer scroll). A lista contem:
@@ -486,24 +577,28 @@ async function extractStopsFromVideoAI(videoPath, { fps = 2 } = {}) {
     // addresses to be processed, even though Claude was capable of
     // reading every single one).
     const cappedFrames = sampleUniformly(frames, MAX_FRAMES_AI);
+    // Kept apart from the number actually read: when the video still has
+    // more frames than the budget after the near-duplicates are gone,
+    // stops CAN have scrolled past in the gap, and the driver has to be
+    // told rather than left with a list that quietly stops short.
+    const framesAvailable = frames.length;
 
     // Instead of sending ONE isolated frame per call (with no notion
     // of what came before/after), we group several SEQUENTIAL frames in
     // the same call — Claude sees them together, with context between
     // them, the same as would happen if you gave it all the images at
     // once in a normal conversation. Also significantly reduces the
-    // number of calls made. Deliberately small batch size (5, no more)
-    // — larger batches risk overwhelming the model with too many
-    // images at once and hurting reading reliability instead of
-    // improving it.
-    const FRAME_BATCH_SIZE = 5;
+    // number of calls made.
     const batches = [];
     for (let i = 0; i < cappedFrames.length; i += FRAME_BATCH_SIZE) {
-      batches.push(cappedFrames.slice(i, i + FRAME_BATCH_SIZE));
+      batches.push({ frames: cappedFrames.slice(i, i + FRAME_BATCH_SIZE), startFrame: i });
     }
 
-    const rawAddresses = [];
+    const readings = [];
     let failedBatches = 0;
+    // Counted as well as the batches: "3 lotes falharam" means nothing
+    // to a driver, "15 frames do video nao foram lidos" does.
+    let failedFrames = 0;
     const CONCURRENCY = 3; // batch groups in parallel — avoid tripping rate limits
     for (let i = 0; i < batches.length; i += CONCURRENCY) {
       const group = batches.slice(i, i + CONCURRENCY);
@@ -513,28 +608,52 @@ async function extractStopsFromVideoAI(videoPath, { fps = 2 } = {}) {
       // batches that succeeded.
       const groupResults = await Promise.all(
         group.map((batch) =>
-          extractAddressesFromFrameBatchAI(batch).catch((err) => {
-            failedBatches++;
-            console.warn("Lote de frames falhou (" + err.message + ") — a continuar com os restantes.");
-            return [];
-          })
+          withRetry(() => extractAddressesFromFrameBatchAI(batch.frames))
+            .then((list) => ({ batch, list }))
+            .catch((err) => {
+              failedBatches++;
+              failedFrames += batch.frames.length;
+              console.warn("Lote de frames falhou apos as tentativas (" + err.message + ") — a continuar com os restantes.");
+              return { batch, list: [] };
+            })
         )
       );
-      for (const list of groupResults) rawAddresses.push(...list);
+      // Promise.all preserves order and the groups run in sequence, so
+      // the readings stay in the order the frames were filmed in.
+      for (const { batch, list } of groupResults) {
+        for (const entry of list) {
+          // The stop number travels with the reading: it is what lets
+          // the marking below tie together the five or six times the
+          // scroll showed this very stop, WITHOUT tying together two
+          // different parcels that happen to share a doorway.
+          readings.push({
+            address: entry.address,
+            stopNumber: entry.stopNumber,
+            frame: batch.startFrame,
+            confidence: "alta",
+          });
+        }
+      }
     }
 
-    const finalAddresses = await consolidateAddressesAI(rawAddresses);
-
+    // NOTE: the AI consolidation pass (consolidateAddressesAI) used to
+    // run here and is deliberately NOT called any more. It deduplicated
+    // and rewrote spellings DURING extraction, which is exactly what the
+    // list must not do now — everything read has to survive to the
+    // interface, marked rather than removed. Dropping it also saves one
+    // Anthropic call per video. The function is still exported: the
+    // cleanup it does belongs in the "Fix Addresses" pass the driver
+    // triggers, not in the read.
     return {
       totalFrames: cappedFrames.length,
-      totalReadings: rawAddresses.length,
+      framesAvailable,
+      totalReadings: readings.length,
       failedBatches,
-      // consolidation already filters out fragments/junk, so
-      // whatever survives gets "high" confidence (same format as the
-      // local engine)
-      stops: finalAddresses.map((address) => ({
-        address, stopNumber: null, confidence: "alta", readings: undefined,
-      })),
+      failedFrames,
+      rawStops: buildRawStops(readings, { nearFrameDistance: FRAME_BATCH_SIZE }),
+      // Readings are attributed to their batch, so two adjacent batches
+      // read FRAME_BATCH_SIZE apart even when the frames were neighbours.
+      dedupeOptions: { threshold: DUPLICATE_SIMILARITY, nearFrameDistance: FRAME_BATCH_SIZE },
     };
   } finally {
     fs.promises.rm(workDir, { recursive: true, force: true }).catch(() => {});
@@ -542,13 +661,18 @@ async function extractStopsFromVideoAI(videoPath, { fps = 2 } = {}) {
 }
 
 async function extractStopsFromImageAI(imagePath) {
-  const addresses = await extractAddressesFromFrameAI(imagePath);
+  const entries = await extractAddressesFromFrameAI(imagePath);
+  const readings = entries.map((entry) => ({
+    address: entry.address,
+    stopNumber: entry.stopNumber,
+    frame: 0,
+    confidence: "alta",
+  }));
   return {
     totalFrames: 1,
-    totalReadings: addresses.length,
-    stops: addresses.map((address) => ({
-      address, stopNumber: null, confidence: "alta", readings: undefined,
-    })),
+    totalReadings: readings.length,
+    rawStops: buildRawStops(readings),
+    dedupeOptions: { threshold: DUPLICATE_SIMILARITY, nearFrameDistance: NEAR_FRAME_DISTANCE },
   };
 }
 
@@ -564,10 +688,20 @@ async function extractStopsFromVideo(videoPath, { fps = 2, ocrLang = "eng" } = {
     for (let i = 0; i < frames.length; i += CONCURRENCY) {
       const batch = frames.slice(i, i + CONCURRENCY);
       const texts = await Promise.all(batch.map((f) => ocrImage(f, ocrLang)));
-      for (const text of texts) readings.push(...parseFrameText(text));
+      // The frame index travels with every reading: it is what later
+      // separates "the same stop scrolled past twice" from "the same
+      // address genuinely delivered to twice".
+      texts.forEach((text, k) => {
+        for (const r of parseFrameText(text)) readings.push({ ...r, frame: i + k });
+      });
     }
 
-    return { totalFrames: frames.length, totalReadings: readings.length, stops: dedupeReadings(readings) };
+    return {
+      totalFrames: frames.length,
+      totalReadings: readings.length,
+      rawStops: buildRawStops(readings),
+      dedupeOptions: { threshold: DUPLICATE_SIMILARITY, nearFrameDistance: NEAR_FRAME_DISTANCE },
+    };
   } finally {
     fs.rm(workDir, { recursive: true, force: true }, () => {});
   }
@@ -575,12 +709,17 @@ async function extractStopsFromVideo(videoPath, { fps = 2, ocrLang = "eng" } = {
 
 async function extractStopsFromImage(imagePath, ocrLang) {
   const text = await ocrImage(imagePath, ocrLang);
-  const readings = parseFrameText(text);
-  const stops = dedupeReadings(readings).map((s) => ({ ...s, confidence: s.confidence === "baixa" ? "alta" : s.confidence }));
   // for a single photo there's no repetition across frames — one
   // clean reading is the best possible case, so it counts as "high"
   // instead of "low" (which was meant for the video scenario with few readings).
-  return { totalFrames: 1, totalReadings: readings.length, stops, rawText: text };
+  const readings = parseFrameText(text).map((r) => ({ ...r, frame: 0, confidence: "alta" }));
+  return {
+    totalFrames: 1,
+    totalReadings: readings.length,
+    rawStops: buildRawStops(readings),
+    dedupeOptions: { threshold: DUPLICATE_SIMILARITY, nearFrameDistance: NEAR_FRAME_DISTANCE },
+    rawText: text,
+  };
 }
 
 module.exports = {
@@ -589,7 +728,11 @@ module.exports = {
   OCR_LANG_BY_UI_LANG,
   MAX_FRAMES,
   MAX_FRAMES_AI,
+  FRAME_BATCH_SIZE,
+  DUPLICATE_SIMILARITY,
+  NEAR_FRAME_DISTANCE,
   runCommand,
+  withRetry,
   tokenize,
   jaccardSimilarity,
   sampleUniformly,
@@ -601,12 +744,18 @@ module.exports = {
   STOP_RE,
   tryMatchAddress,
   parseFrameText,
-  dedupeReadings,
+  buildRawStops,
+  markDuplicates,
+  markGeocodedDuplicates,
+  countDuplicates,
   extractFramesForAI,
+  buildAiFrameArgs,
   AI_FRAME_PROMPT,
   AI_BATCH_PROMPT,
   AI_CONSOLIDATE_PROMPT_HEADER,
   parseJsonArraySafe,
+  parseJsonArrayRaw,
+  parseAiStopList,
   extractAddressesFromFrameAI,
   extractAddressesFromFrameBatchAI,
   consolidateAddressesAI,

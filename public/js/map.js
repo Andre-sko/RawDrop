@@ -26,6 +26,18 @@
 
   let lastRequestParams = null; // { addresses, roundTrip, deadlines, startMinutes, stopMinutes }
   let lastRoute = null; // last successful /api/route response
+  let routeIsOptimized = false; // true when lastRoute came from "Reorganizar rota" / applying an alternative, not a plain recalculation
+
+  // ---------- "Ver rota antes da otimização" ----------
+  // Captured by index.html (setPreOptimizeSnapshot) right when "Otimizar"
+  // succeeds, from the request shape as it stood *before* reordering — no
+  // server round trip at that point. The actual geometry/stops for that
+  // snapshot are only fetched (once, then cached) the first time the
+  // toggle button is clicked.
+  let preOptimizeSnapshot = null; // { addresses, roundTrip, deadlines, startMinutes, stopMinutes }
+  let preOptimizeRouteCache = null; // full /api/route response for that snapshot, once fetched
+  let showingPreOptimizeRoute = false;
+  let savedOptimizedState = null; // { lastRoute, routeIsOptimized, routeCumulative, routeStopMarkers } stashed while showing it
   let mode = 'idle'; // 'idle' | 'block-line' | 'exclude-a' | 'exclude-b'
   let pickedA = null; // [lng, lat]
   let pickedB = null;
@@ -44,12 +56,6 @@
   // Where the user actually clicked on the route, so the server can
   // centre the blocked piece there when the leg is too long to block whole.
   let blockAnchorPoint = null;
-  // Blocks applied in this session, newest last:
-  // { restrictionId, order, addressesAfter }. "Reverter bloqueio" only
-  // un-reorders the stops when it is removing that exact block AND the
-  // address list is still the one it reordered — otherwise inverting a
-  // stale permutation would silently scramble the user's own edits.
-  let appliedBlocks = [];
 
   // Restrictions the server last reported: everything still valid
   // (in force + scheduled for later), and the subset applying right now.
@@ -71,6 +77,286 @@
 
   const EMPTY_FC = { type: 'FeatureCollection', features: [] };
 
+  // ---------- Base map style ----------
+  // Raster tile sets only (no vector styles/API keys needed) — each one
+  // just swaps the single 'base-raster' source, everything else (route
+  // line, stop markers, blocked segments, ...) is added back on top by
+  // addOverlayLayers() after every style switch, since MapLibre's
+  // setStyle() wipes all sources/layers that aren't part of the new style.
+  // 'raster': a single XYZ tile source we build ourselves. 'url': a full
+  // MapLibre style (vector, with its own sources/sprite/glyphs) fetched
+  // from its own URL — MapLibre accepts a style URL anywhere it accepts
+  // a style object, both at map creation and in setStyle().
+  //
+  // dark/light used to be CARTO's Dark Matter / Positron raster tiles,
+  // which were free without a key for years — CARTO has since locked
+  // basemaps.cartocdn.com behind a required API key (the "free" tiles
+  // now render with an "API KEY REQUIRED" watermark baked into the
+  // image instead of failing the request, so this is easy to miss by
+  // only checking the HTTP status). OpenFreeMap hosts the same
+  // Positron/Dark-Matter designs as open vector styles on its own free,
+  // no-key infrastructure, so those replace CARTO here instead of
+  // asking for an account.
+  const MAP_STYLES = {
+    dark: { type: 'url', url: 'https://tiles.openfreemap.org/styles/dark' },
+    light: { type: 'url', url: 'https://tiles.openfreemap.org/styles/positron' },
+    satellite: {
+      type: 'raster',
+      tiles: ['https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'],
+      attribution: 'Tiles &copy; Esri — Source: Esri, Maxar, Earthstar Geographics, and the GIS User Community',
+    },
+    topo: {
+      type: 'raster',
+      tiles: ['a', 'b', 'c'].map((s) => `https://${s}.tile.opentopomap.org/{z}/{x}/{y}.png`),
+      attribution: '&copy; OpenStreetMap contributors, SRTM | &copy; <a href="https://opentopomap.org">OpenTopoMap</a> (CC-BY-SA)',
+    },
+  };
+  const DEFAULT_MAP_STYLE = 'dark';
+  const MAP_STYLE_STORAGE_KEY = 'routeTrackerMapStyle';
+
+  function loadStoredMapStyle() {
+    try {
+      const stored = window.localStorage.getItem(MAP_STYLE_STORAGE_KEY);
+      return stored && MAP_STYLES[stored] ? stored : DEFAULT_MAP_STYLE;
+    } catch (_) { return DEFAULT_MAP_STYLE; } // private browsing etc — just use the default
+  }
+
+  let currentMapStyle = loadStoredMapStyle();
+
+  function buildBaseStyle(styleId) {
+    const chosen = MAP_STYLES[styleId] ? styleId : DEFAULT_MAP_STYLE;
+    const style = MAP_STYLES[chosen];
+    if (style.type === 'url') return style.url; // MapLibre fetches+owns this style entirely
+    return {
+      version: 8,
+      sources: { 'base-raster': { type: 'raster', tiles: style.tiles, tileSize: 256, attribution: style.attribution } },
+      layers: [{ id: 'base-raster-layer', type: 'raster', source: 'base-raster' }],
+    };
+  }
+
+  // ---------- Pin/route visual style ("Clássico" vs "Moderno") ----------
+  // Independent from the base tile style above: this one only reskins the
+  // route line + stop markers, via paint/layout overrides applied in
+  // applyPinStyle() — it never touches map.setStyle()/sources.
+  const MODERN_GREY = '#5B6472'; // "before optimizing" / "already visited" — neutral, not a state color
+  const MODERN_AMBER = '#E8A33D'; // matches the app's existing amber accent
+  const DEFAULT_PIN_STYLE = 'classic';
+  const PIN_STYLE_STORAGE_KEY = 'routeTrackerPinStyle';
+
+  function loadStoredPinStyle() {
+    try {
+      const stored = window.localStorage.getItem(PIN_STYLE_STORAGE_KEY);
+      return stored === 'modern' ? 'modern' : DEFAULT_PIN_STYLE;
+    } catch (_) { return DEFAULT_PIN_STYLE; }
+  }
+
+  let pinStyle = loadStoredPinStyle();
+
+  function updateMapStyleUI() {
+    const group = $('mapStyleGroup');
+    if (!group) return;
+    group.querySelectorAll('.map-style-btn').forEach((btn) => {
+      btn.classList.toggle('active', btn.getAttribute('data-style') === currentMapStyle);
+    });
+  }
+
+  // Redraws everything that lives on top of the base map — called once
+  // after the initial 'load' and again after every style switch, since
+  // setStyle() throws away all sources/layers/data that aren't part of
+  // the new style JSON.
+  function addOverlayLayers() {
+    map.addSource('route-line', { type: 'geojson', data: EMPTY_FC });
+    map.addLayer({
+      id: 'route-line-layer', type: 'line', source: 'route-line',
+      layout: { 'line-join': 'round', 'line-cap': 'round' },
+      paint: { 'line-color': '#E8A33D', 'line-width': 4 },
+    });
+
+    map.addSource('preview-route-line', { type: 'geojson', data: EMPTY_FC });
+    map.addLayer({
+      id: 'preview-route-line-layer', type: 'line', source: 'preview-route-line',
+      layout: { 'line-join': 'round', 'line-cap': 'round' },
+      paint: { 'line-color': '#4FAE7C', 'line-width': 4, 'line-dasharray': [1, 1.4] },
+    });
+
+    map.addSource('stops', { type: 'geojson', data: EMPTY_FC });
+    map.addLayer({
+      id: 'stops-circle-layer', type: 'circle', source: 'stops',
+      paint: {
+        'circle-radius': 10, 'circle-color': '#171D26',
+        'circle-stroke-width': 2, 'circle-stroke-color': '#E8A33D',
+      },
+    });
+    map.addLayer({
+      id: 'stops-label-layer', type: 'symbol', source: 'stops',
+      layout: {
+        'text-field': ['to-string', ['get', 'seq']],
+        'text-size': 11, 'text-font': ['Open Sans Bold', 'Arial Unicode MS Bold'],
+      },
+      paint: { 'text-color': '#E8A33D' },
+    });
+
+    // "Moderno" only: the departure point drawn distinct from the rest
+    // (bigger, solid, no stroke, no number) — same 'stops' source, just
+    // filtered down to seq 1. Hidden in 'classic' and once seq 1 has
+    // been visited during "Animar rota" (see applyPinStyle()), at which
+    // point it folds into stops-circle-layer/stops-label-layer like any
+    // other passed stop.
+    map.addLayer({
+      id: 'start-point-layer', type: 'circle', source: 'stops',
+      filter: ['==', ['get', 'seq'], 1],
+      layout: { visibility: 'none' },
+      paint: { 'circle-radius': 14, 'circle-color': MODERN_AMBER },
+    });
+
+    map.addSource('excluded-segments', { type: 'geojson', data: EMPTY_FC });
+    map.addLayer({
+      id: 'excluded-segments-layer', type: 'line', source: 'excluded-segments',
+      layout: { 'line-join': 'round', 'line-cap': 'round' },
+      paint: { 'line-color': '#E2665B', 'line-width': 6, 'line-dasharray': [0.2, 1.6] },
+    });
+    map.addLayer({
+      id: 'excluded-segments-label-layer', type: 'symbol', source: 'excluded-segments',
+      layout: {
+        'symbol-placement': 'line-center',
+        'text-field': '🚧 ' + t('blockedRoadLabel'),
+        'text-size': 12, 'text-offset': [0, -1],
+      },
+      paint: { 'text-color': '#E2665B', 'text-halo-color': '#171D26', 'text-halo-width': 1.5 },
+    });
+
+    map.addSource('pick-points', { type: 'geojson', data: EMPTY_FC });
+    map.addLayer({
+      id: 'pick-points-layer', type: 'circle', source: 'pick-points',
+      paint: { 'circle-radius': 7, 'circle-color': '#E2665B', 'circle-stroke-width': 2, 'circle-stroke-color': '#fff' },
+    });
+
+    // "Animar rota": a highlight line traces over the route as a marker
+    // travels along it — both fed by the same precomputed cumulative
+    // distances (see buildCumulative/pointAtDistance below).
+    map.addSource('animation-progress-line', { type: 'geojson', data: EMPTY_FC });
+    map.addLayer({
+      id: 'animation-progress-line-layer', type: 'line', source: 'animation-progress-line',
+      layout: { 'line-join': 'round', 'line-cap': 'round' },
+      paint: { 'line-color': '#ffffff', 'line-width': 4 },
+    });
+
+    map.addSource('animation-marker', { type: 'geojson', data: EMPTY_FC });
+    map.addLayer({
+      id: 'animation-marker-layer', type: 'circle', source: 'animation-marker',
+      paint: {
+        'circle-radius': 8, 'circle-color': '#4FAE7C',
+        'circle-stroke-width': 2, 'circle-stroke-color': '#fff',
+      },
+    });
+
+    applyPinStyle();
+  }
+
+  // Applies the current pinStyle ('classic' | 'modern') to every layer it
+  // touches. Called once right after the layers above are (re)created —
+  // at init and after every base-style switch, since setStyle() wipes
+  // paint overrides along with everything else — and again whenever the
+  // user toggles the pin-style buttons. Per-feature state that these
+  // paint expressions read (optimized, passed) lives on the GeoJSON
+  // features themselves (see buildStopsFeatureCollection/renderRoute) and
+  // updates on its own via setData(), so it never needs a call here.
+  function applyPinStyle() {
+    if (!map || !map.getLayer('stops-circle-layer')) return;
+    const modern = pinStyle === 'modern';
+
+    // In 'modern', the shared stops layers skip seq 1 until it's been
+    // visited (start-point-layer draws it instead); in 'classic' every
+    // stop — including seq 1 — always goes through the shared layers.
+    const sharedFilter = modern ? ['any', ['!=', ['get', 'seq'], 1], ['get', 'passed']] : null;
+    map.setFilter('stops-circle-layer', sharedFilter);
+    map.setFilter('stops-label-layer', sharedFilter);
+    map.setFilter('start-point-layer', ['all', ['==', ['get', 'seq'], 1], ['!', ['get', 'passed']]]);
+    map.setLayoutProperty('start-point-layer', 'visibility', modern ? 'visible' : 'none');
+
+    map.setPaintProperty('stops-circle-layer', 'circle-color', modern
+      ? ['case', ['get', 'passed'], MODERN_GREY, '#FFFFFF']
+      : '#171D26');
+    map.setPaintProperty('stops-circle-layer', 'circle-stroke-color', modern
+      ? ['case', ['get', 'passed'], MODERN_GREY, ['get', 'optimized'], MODERN_AMBER, MODERN_GREY]
+      : MODERN_AMBER);
+
+    map.setLayoutProperty('stops-label-layer', 'text-field', modern
+      ? ['case', ['get', 'passed'], '✓', ['get', 'optimized'], ['to-string', ['get', 'seq']], '●']
+      : ['to-string', ['get', 'seq']]);
+    map.setPaintProperty('stops-label-layer', 'text-color', modern
+      ? ['case', ['get', 'passed'], '#FFFFFF', ['get', 'optimized'], MODERN_AMBER, MODERN_GREY]
+      : MODERN_AMBER);
+
+    map.setPaintProperty('route-line-layer', 'line-color', modern
+      ? ['case', ['get', 'optimized'], MODERN_AMBER, MODERN_GREY]
+      : MODERN_AMBER);
+
+    // The traced "already traveled" highlight during "Animar rota" — white
+    // (today's look) in 'classic', muted grey in 'modern' so the untraveled
+    // rest of the route (still the normal route-line-layer colour showing
+    // through) reads as the "next" leg.
+    map.setPaintProperty('animation-progress-line-layer', 'line-color', modern ? MODERN_GREY : '#ffffff');
+
+    updateRouteLineDasharray();
+  }
+
+  // line-dasharray isn't a data-driven paint property in MapLibre (unlike
+  // line-color/line-width above), so it can't ride the 'optimized' feature
+  // property via an expression — it has to be re-applied imperatively
+  // whenever pinStyle or routeIsOptimized change.
+  function updateRouteLineDasharray() {
+    if (!map || !map.getLayer('route-line-layer')) return;
+    const dashed = pinStyle === 'modern' && !routeIsOptimized;
+    map.setPaintProperty('route-line-layer', 'line-dasharray', dashed ? [1, 1.4] : null);
+  }
+
+  function updatePinStyleUI() {
+    const group = $('pinStyleGroup');
+    if (!group) return;
+    group.querySelectorAll('[data-pin-style]').forEach((btn) => {
+      btn.classList.toggle('active', btn.getAttribute('data-pin-style') === pinStyle);
+    });
+  }
+
+  function setPinStyle(styleId) {
+    if ((styleId !== 'classic' && styleId !== 'modern') || styleId === pinStyle) return;
+    pinStyle = styleId;
+    try { window.localStorage.setItem(PIN_STYLE_STORAGE_KEY, styleId); } catch (_) { /* private browsing etc */ }
+    updatePinStyleUI();
+    applyPinStyle();
+  }
+
+  // Redraws whatever data was already on screen (route, stops, blocked
+  // segments) on top of a freshly rebuilt set of layers — needed after a
+  // style switch, since addOverlayLayers() above only recreates empty
+  // sources. Transient interactive state (a block preview mid-edit, the
+  // two picked points, an in-progress animation frame) is deliberately
+  // NOT restored: switching the base map is rare enough that resetting
+  // those is simpler and safer than trying to resume them mid-style-load.
+  function redrawOverlaysAfterStyleSwitch() {
+    if (lastRoute) {
+      renderRoute(lastRoute.geometry);
+      renderStops(lastRoute.stops);
+    }
+    renderExcludedSegments(inForceRestrictions);
+  }
+
+  function setMapStyle(styleId) {
+    if (!MAP_STYLES[styleId] || styleId === currentMapStyle) return;
+    currentMapStyle = styleId;
+    try { window.localStorage.setItem(MAP_STYLE_STORAGE_KEY, styleId); } catch (_) { /* private browsing etc */ }
+    updateMapStyleUI();
+    if (!map) return; // just remembered for when the map is actually created
+    stopAnimation();
+    resetPicking();
+    map.once('style.load', () => {
+      addOverlayLayers();
+      redrawOverlaysAfterStyleSwitch();
+    });
+    map.setStyle(buildBaseStyle(currentMapStyle));
+  }
+
   // ---------- "Animar rota" (stop-to-stop playback) ----------
   const ANIMATION_BASE_DURATION_MS = 8000; // time to cover the whole route at 1x
   const ANIMATION_DWELL_MS = 900; // pause length at each stop
@@ -85,6 +371,12 @@
   let animationNextStopIdx = 0;
   let animationDwellTimeoutId = null;
   let animationTooltipEl = null;
+  let animationPassedSeqs = new Set(); // seqs already reached — drives the "modern" style's greyed-out/checkmark look
+  // True from the first click on "Animar rota" (revealing speed + pin-style
+  // controls and a "▶ Play" button to actually start it) until the
+  // animation is stopped/reset — lets the person configure before playing
+  // instead of the animation starting immediately.
+  let animateControlsExpanded = false;
 
   function $(id) { return document.getElementById(id); }
 
@@ -120,6 +412,8 @@
   function showMapUnavailable() {
     $('mapContainer').style.display = 'none';
     $('mapToolbar').style.display = 'none';
+    $('mapStyleGroup').style.display = 'none';
+    $('pinStyleGroup').style.display = 'none';
     $('mapEmptyState').style.display = '';
     $('mapEmptyState').textContent = t('mapWebglUnavailable');
     $('stopsPanel').style.display = 'none';
@@ -145,18 +439,7 @@
     try {
       map = new maplibregl.Map({
         container: 'mapContainer',
-        style: {
-          version: 8,
-          sources: {
-            'osm-raster': {
-              type: 'raster',
-              tiles: ['https://tile.openstreetmap.org/{z}/{x}/{y}.png'],
-              tileSize: 256,
-              attribution: '&copy; OpenStreetMap contributors',
-            },
-          },
-          layers: [{ id: 'osm-raster-layer', type: 'raster', source: 'osm-raster' }],
-        },
+        style: buildBaseStyle(currentMapStyle),
         center: [7.4474, 46.9481],
         zoom: 9,
       });
@@ -176,77 +459,7 @@
     map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right');
 
     map.on('load', () => {
-      map.addSource('route-line', { type: 'geojson', data: EMPTY_FC });
-      map.addLayer({
-        id: 'route-line-layer', type: 'line', source: 'route-line',
-        layout: { 'line-join': 'round', 'line-cap': 'round' },
-        paint: { 'line-color': '#E8A33D', 'line-width': 4 },
-      });
-
-      map.addSource('preview-route-line', { type: 'geojson', data: EMPTY_FC });
-      map.addLayer({
-        id: 'preview-route-line-layer', type: 'line', source: 'preview-route-line',
-        layout: { 'line-join': 'round', 'line-cap': 'round' },
-        paint: { 'line-color': '#4FAE7C', 'line-width': 4, 'line-dasharray': [1, 1.4] },
-      });
-
-      map.addSource('stops', { type: 'geojson', data: EMPTY_FC });
-      map.addLayer({
-        id: 'stops-circle-layer', type: 'circle', source: 'stops',
-        paint: {
-          'circle-radius': 10, 'circle-color': '#171D26',
-          'circle-stroke-width': 2, 'circle-stroke-color': '#E8A33D',
-        },
-      });
-      map.addLayer({
-        id: 'stops-label-layer', type: 'symbol', source: 'stops',
-        layout: {
-          'text-field': ['to-string', ['get', 'seq']],
-          'text-size': 11, 'text-font': ['Open Sans Bold', 'Arial Unicode MS Bold'],
-        },
-        paint: { 'text-color': '#E8A33D' },
-      });
-
-      map.addSource('excluded-segments', { type: 'geojson', data: EMPTY_FC });
-      map.addLayer({
-        id: 'excluded-segments-layer', type: 'line', source: 'excluded-segments',
-        layout: { 'line-join': 'round', 'line-cap': 'round' },
-        paint: { 'line-color': '#E2665B', 'line-width': 6, 'line-dasharray': [0.2, 1.6] },
-      });
-      map.addLayer({
-        id: 'excluded-segments-label-layer', type: 'symbol', source: 'excluded-segments',
-        layout: {
-          'symbol-placement': 'line-center',
-          'text-field': '🚧 ' + t('blockedRoadLabel'),
-          'text-size': 12, 'text-offset': [0, -1],
-        },
-        paint: { 'text-color': '#E2665B', 'text-halo-color': '#171D26', 'text-halo-width': 1.5 },
-      });
-
-      map.addSource('pick-points', { type: 'geojson', data: EMPTY_FC });
-      map.addLayer({
-        id: 'pick-points-layer', type: 'circle', source: 'pick-points',
-        paint: { 'circle-radius': 7, 'circle-color': '#E2665B', 'circle-stroke-width': 2, 'circle-stroke-color': '#fff' },
-      });
-
-      // "Animar rota": a highlight line traces over the route as a marker
-      // travels along it — both fed by the same precomputed cumulative
-      // distances (see buildCumulative/pointAtDistance below).
-      map.addSource('animation-progress-line', { type: 'geojson', data: EMPTY_FC });
-      map.addLayer({
-        id: 'animation-progress-line-layer', type: 'line', source: 'animation-progress-line',
-        layout: { 'line-join': 'round', 'line-cap': 'round' },
-        paint: { 'line-color': '#ffffff', 'line-width': 4 },
-      });
-
-      map.addSource('animation-marker', { type: 'geojson', data: EMPTY_FC });
-      map.addLayer({
-        id: 'animation-marker-layer', type: 'circle', source: 'animation-marker',
-        paint: {
-          'circle-radius': 8, 'circle-color': '#4FAE7C',
-          'circle-stroke-width': 2, 'circle-stroke-color': '#fff',
-        },
-      });
+      addOverlayLayers();
 
       map.on('click', onMapClick);
 
@@ -281,7 +494,8 @@
   // ---------- Rendering ----------
 
   function renderRoute(geometry) {
-    setSourceData('route-line', { type: 'Feature', geometry, properties: {} });
+    setSourceData('route-line', { type: 'Feature', geometry, properties: { optimized: routeIsOptimized } });
+    updateRouteLineDasharray();
     const coords = geometry.coordinates;
     if (coords.length > 0) {
       const bounds = coords.reduce(
@@ -292,16 +506,44 @@
     }
   }
 
-  function renderStops(stops) {
-    setSourceData('stops', {
+  // /api/route echoes back exactly the (alias-resolved) string that was
+  // sent for each stop — which is raw "lat,lng" text whenever an alias
+  // points at bare coordinates instead of a postal address. `labels` is
+  // what's actually typed/shown in the address box (index.html's
+  // `rawAddresses`, before alias resolution), which every on-map display
+  // (pins, popups, sidebar list) should show instead.
+  function withDisplayLabels(route, labels) {
+    if (!Array.isArray(labels) || labels.length !== route.stops.length) return route;
+    return { ...route, stops: route.stops.map((s, i) => ({ ...s, address: labels[i] || s.address })) };
+  }
+
+  // Shared by renderStops() (fresh route load) and markStopPassed() (an
+  // "Animar rota" stop arrival) so the 'passed'/'optimized' properties
+  // driving applyPinStyle()'s expressions are built the same way both times.
+  function buildStopsFeatureCollection(stops, passedSeqs) {
+    return {
       type: 'FeatureCollection',
       features: stops.map((s, i) => ({
         type: 'Feature',
         geometry: { type: 'Point', coordinates: [s.lng, s.lat] },
-        properties: { seq: i + 1, address: s.address },
+        properties: { seq: i + 1, address: s.address, optimized: routeIsOptimized, passed: passedSeqs.has(i + 1) },
       })),
-    });
+    };
+  }
+
+  function renderStops(stops) {
+    animationPassedSeqs = new Set();
+    setSourceData('stops', buildStopsFeatureCollection(stops, animationPassedSeqs));
     renderStopsPanel(stops);
+  }
+
+  // Called as "Animar rota" reaches each stop (see beginDwell()) — updates
+  // just the 'stops' source so that stop turns grey/checkmarked in
+  // 'modern' style, without touching the sidebar panel.
+  function markStopPassed(seq) {
+    if (!lastRoute) return;
+    animationPassedSeqs.add(seq);
+    setSourceData('stops', buildStopsFeatureCollection(lastRoute.stops, animationPassedSeqs));
   }
 
   // ---------- Stops panel (sidebar list, click centers the map) ----------
@@ -388,6 +630,21 @@
     });
   }
 
+  // Turns the server's "no alternative route" into something the driver
+  // can act on. Nearly always the block has sealed off one delivery —
+  // its own doorstep is inside the segment that was just drawn — and
+  // then no detour exists for it at all, so the fix is to move the block
+  // rather than to look for another way round.
+  function blockErrorMessage(data){
+    const stranded = Array.isArray(data && data.unreachable) ? data.unreachable : [];
+    if(stranded.length === 0) return (data && data.error) || t('mapPreviewError');
+
+    const names = stranded.map(s => s.address).join(', ');
+    return stranded.some(s => s.insideNewBlock)
+      ? t('blockSealsStopInside', {stops: names})
+      : t('blockSealsStopElsewhere', {stops: names});
+  }
+
   async function refreshActiveRestrictions() {
     try {
       const res = await fetch('/api/road-restrictions?includeScheduled=1');
@@ -400,7 +657,6 @@
       inForceRestrictions = list.filter((r) => !r.startsAt || new Date(r.startsAt).getTime() <= now);
       renderExcludedSegments(inForceRestrictions);
       renderActiveRestrictionsList(list);
-      $('mapToolRevert').style.display = list.length > 0 ? '' : 'none';
     } catch (err) { /* mapa continua a funcionar sem a lista */ }
   }
 
@@ -499,16 +755,29 @@
   }
 
   function updateAnimationUI() {
-    const playBtn = $('mapToolAnimate');
+    const animateBtn = $('mapToolAnimate');
+    const playBtn = $('mapToolAnimatePlay');
     const stopBtn = $('mapToolAnimateStop');
     const speedGroup = $('animSpeedGroup');
-    if (!playBtn) return;
-    if (!animationSessionActive) playBtn.textContent = t('mapToolAnimate');
-    else if (animating) playBtn.textContent = t('mapToolAnimatePause');
-    else playBtn.textContent = t('mapToolAnimateResume');
-    playBtn.classList.toggle('active', animating);
+    const styleGroup = $('pinStyleGroup');
+    if (!animateBtn) return;
+
+    // Three states: idle ("▶️ Animar rota", nothing else showing),
+    // configuring (revealed by that click — speed + pin-style controls and
+    // "▶ Play", "Animar rota" itself hidden), playing/paused (back to
+    // "Animar rota" doubling as pause/resume, plus "Parar animação").
+    const configuring = animateControlsExpanded && !animationSessionActive;
+
+    animateBtn.style.display = configuring ? 'none' : '';
+    if (!animationSessionActive) animateBtn.textContent = t('mapToolAnimate');
+    else if (animating) animateBtn.textContent = t('mapToolAnimatePause');
+    else animateBtn.textContent = t('mapToolAnimateResume');
+    animateBtn.classList.toggle('active', animating);
+
+    if (playBtn) playBtn.style.display = configuring ? '' : 'none';
     if (stopBtn) stopBtn.style.display = animationSessionActive ? '' : 'none';
-    if (speedGroup) speedGroup.style.display = animationSessionActive ? '' : 'none';
+    if (speedGroup) speedGroup.style.display = animateControlsExpanded ? '' : 'none';
+    if (styleGroup) styleGroup.style.display = animateControlsExpanded ? 'flex' : 'none';
   }
 
   function positionAnimationTooltip() {
@@ -540,6 +809,7 @@
   function beginDwell(stop) {
     if (animationFrameId !== null) { cancelAnimationFrame(animationFrameId); animationFrameId = null; }
     const { point } = pointAtDistance(animationCumulative, stop.distance, 1);
+    markStopPassed(stop.seq);
     showAnimationTooltip(stop.seq, stop.address, point);
     animationDwellTimeoutId = setTimeout(() => {
       animationDwellTimeoutId = null;
@@ -589,10 +859,12 @@
     animationProgress = 0;
     animationNextStopIdx = 0;
     animationLastFrameTime = null;
+    animateControlsExpanded = false;
     hideAnimationTooltip();
     if (map) {
       setSourceData('animation-progress-line', EMPTY_FC);
       setSourceData('animation-marker', EMPTY_FC);
+      if (lastRoute) renderStops(lastRoute.stops); // clears any grey/checkmarked "passed" stops from 'modern' style
     }
     updateAnimationUI();
   }
@@ -606,6 +878,7 @@
     animationProgress = 0;
     animationNextStopIdx = 0;
     animationLastFrameTime = null;
+    animateControlsExpanded = true;
     animationSessionActive = true;
     animating = true;
     updateAnimationUI();
@@ -837,7 +1110,13 @@
     // One popup at a time — clicking through the stops panel never fires
     // the map's own close-on-click, so without this they pile up.
     if (stopPopup) stopPopup.remove();
-    const popup = new maplibregl.Popup({ closeButton: true, maxWidth: '260px' })
+    // focusAfterOpen defaults to true — MapLibre moves keyboard focus into
+    // the popup as soon as it opens, which makes the browser scroll that
+    // element into view. Since this fires on every click of a stop (in
+    // the sidebar list or on the map pin), that shows up as the whole
+    // page occasionally jumping. Off, since nothing here needs the popup
+    // itself to be keyboard-navigable.
+    const popup = new maplibregl.Popup({ closeButton: true, maxWidth: '260px', focusAfterOpen: false })
       .setLngLat(lngLat)
       .setHTML(html)
       .addTo(map);
@@ -1110,7 +1389,7 @@
       });
       const data = await res.json();
       if (!res.ok) {
-        showErrorPanel(data.error || t('mapPreviewError'));
+        showErrorPanel(blockErrorMessage(data));
         setSourceData('excluded-segments', EMPTY_FC);
         return;
       }
@@ -1182,7 +1461,6 @@
     // The route is only reordered once the block is actually stored:
     // reordering against a block the server rejected would leave the
     // deliveries shuffled for a restriction that doesn't exist.
-    let saved = null;
     try {
       const res = await fetch('/api/road-exclusion/confirm', {
         method: 'POST',
@@ -1190,8 +1468,7 @@
         body: JSON.stringify({ draftRestriction }),
       });
       const body = await res.json().catch(() => ({}));
-      if (!res.ok) { showErrorPanel(body.error || t('mapPreviewError')); return; }
-      saved = body;
+      if (!res.ok) { showErrorPanel(blockErrorMessage(body)); return; }
     } catch (err) {
       showErrorPanel(t('serverContactError'));
       return;
@@ -1200,81 +1477,25 @@
     const order = pendingPreview.order;
     setSourceData('preview-route-line', EMPTY_FC);
     resetPicking();
-    if (window.applyReorderedRoute) {
-      await window.applyReorderedRoute(order);
-      appliedBlocks.push({
-        restrictionId: saved.id,
-        order,
-        addressesAfter: lastRequestParams ? lastRequestParams.addresses.slice() : null,
-      });
-    }
-  }
-
-  // ---------- "Reverter bloqueio" ----------
-
-  // An order says "position i now holds what used to be at order[i]".
-  // The inverse says where each original entry went, which is exactly
-  // what turns a reordered list back into the one it came from:
-  // apply(apply(xs, order), invertOrder(order)) === xs.
-  function invertOrder(order) {
-    const inverse = new Array(order.length);
-    order.forEach((originalIdx, newIdx) => { inverse[originalIdx] = newIdx; });
-    return inverse;
-  }
-
-  // Same list the toolbar button's visibility is based on, so "revert"
-  // can also cancel a block that is only scheduled for a future date.
-  async function revertLastBlock() {
-    let list = [];
-    try {
-      const res = await fetch('/api/road-restrictions?includeScheduled=1');
-      list = res.ok ? await res.json() : [];
-    } catch (err) {
-      showErrorPanel(t('serverContactError'));
-      return;
-    }
-    if (list.length === 0) {
-      showErrorPanel(t('revertNoBlocks'));
-      return;
-    }
-
-    const newest = list.reduce((a, b) => (new Date(b.createdAt) > new Date(a.createdAt) ? b : a));
-    try {
-      const res = await fetch('/api/road-restrictions/' + encodeURIComponent(newest.id), { method: 'DELETE' });
-      if (!res.ok) { showErrorPanel(t('mapPreviewError')); return; }
-    } catch (err) {
-      showErrorPanel(t('serverContactError'));
-      return;
-    }
-
-    stopAnimation();
-    resetPicking();
-
-    // Applying a block can also reorder the stops, so undoing it puts
-    // that order back too — otherwise revert would restore the road but
-    // leave the deliveries shuffled. Only done when this is the block
-    // that did the reordering and the address list is still the one it
-    // produced; if the user has edited the list since, its own order
-    // wins and the route is simply recalculated.
-    const entryIdx = appliedBlocks.findIndex((b) => b.restrictionId === newest.id);
-    const entry = entryIdx >= 0 ? appliedBlocks[entryIdx] : null;
-    if (entryIdx >= 0) appliedBlocks.splice(entryIdx, 1);
-
-    const currentAddresses = lastRequestParams ? lastRequestParams.addresses : null;
-    const listUnchanged = entry && entry.addressesAfter && currentAddresses
-      && entry.addressesAfter.length === currentAddresses.length
-      && entry.addressesAfter.every((a, i) => a === currentAddresses[i]);
-
-    if (listUnchanged && window.applyReorderedRoute) {
-      await window.applyReorderedRoute(invertOrder(entry.order));
-      return;
-    }
-    if (lastRequestParams) await loadRoute(lastRequestParams);
+    if (window.applyReorderedRoute) await window.applyReorderedRoute(order);
   }
 
   // ---------- Public API ----------
 
   async function loadRoute(params) {
+    // A fresh load fully replaces whatever was on screen — any "Ver rota
+    // antes da otimização" preview in progress no longer applies to it,
+    // and a plain recalculation (not the result of "Otimizar") means
+    // whatever was snapshotted before no longer corresponds to "one click
+    // back" from what's about to be shown.
+    showingPreOptimizeRoute = false;
+    savedOptimizedState = null;
+    if (!params.optimized) {
+      preOptimizeSnapshot = null;
+      preOptimizeRouteCache = null;
+    }
+    updatePreOptimizeButtonUI();
+
     lastRequestParams = params;
     stopAnimation();
 
@@ -1283,6 +1504,7 @@
     $('mapEmptyState').style.display = 'none';
     $('mapContainer').style.display = '';
     $('mapToolbar').style.display = '';
+    $('mapStyleGroup').style.display = '';
     ensureMap(); // criado (ou apenas redimensionado) DEPOIS de o container ficar visivel
     setTimeout(() => { if (map) map.resize(); }, 0);
     await mapReady; // sources/layers só existem depois do evento 'load' (ou da falha de WebGL)
@@ -1294,7 +1516,6 @@
     // seguir a aplicar uma exclusão, antes deste fetch terminar).
     $('mapToolExclude').disabled = true;
     $('mapToolAnimate').disabled = true;
-    $('mapToolRevert').disabled = true;
 
     try {
       const res = await fetch('/api/route', {
@@ -1306,6 +1527,7 @@
       if (res.status === 501) {
         $('mapContainer').style.display = 'none';
         $('mapToolbar').style.display = 'none';
+        $('mapStyleGroup').style.display = 'none';
         $('mapEmptyState').style.display = '';
         $('mapEmptyState').textContent = t('mapNotConfigured');
         $('stopsPanel').style.display = 'none';
@@ -1319,11 +1541,12 @@
         return;
       }
 
-      lastRoute = data;
+      lastRoute = withDisplayLabels(data, params.labels);
+      routeIsOptimized = !!params.optimized;
       routeCumulative = null; // rebuilt lazily for the new geometry
       routeStopMarkers = null;
-      renderRoute(data.geometry);
-      renderStops(data.stops);
+      renderRoute(lastRoute.geometry);
+      renderStops(lastRoute.stops);
       await refreshActiveRestrictions();
     } catch (err) {
       $('mapEmptyState').style.display = '';
@@ -1332,18 +1555,22 @@
     } finally {
       $('mapToolExclude').disabled = false;
       $('mapToolAnimate').disabled = false;
-      $('mapToolRevert').disabled = false;
     }
   }
 
   function clear() {
     lastRoute = null;
+    routeIsOptimized = false;
     pendingPreview = null;
     routeCumulative = null;
     routeStopMarkers = null;
-    appliedBlocks = [];
+    preOptimizeSnapshot = null;
+    preOptimizeRouteCache = null;
+    showingPreOptimizeRoute = false;
+    savedOptimizedState = null;
     stopAnimation();
     resetPicking();
+    updatePreOptimizeButtonUI();
     if (map) {
       setSourceData('route-line', EMPTY_FC);
       setSourceData('stops', EMPTY_FC);
@@ -1351,17 +1578,87 @@
     }
     $('mapContainer').style.display = 'none';
     $('mapToolbar').style.display = 'none';
+    $('mapStyleGroup').style.display = 'none';
     $('mapEmptyState').style.display = '';
     $('mapEmptyState').textContent = t('mapEmptyState');
     $('stopsPanel').style.display = 'none';
     $('stopsPanelList').innerHTML = '';
-    $('mapToolRevert').style.display = 'none';
+  }
+
+  // ---------- "Ver rota antes da otimização" ----------
+
+  function setPreOptimizeSnapshot(snapshot) {
+    preOptimizeSnapshot = snapshot;
+    preOptimizeRouteCache = null; // a new "Otimizar" invalidates whatever was fetched for the previous one
+    updatePreOptimizeButtonUI();
+  }
+
+  function updatePreOptimizeButtonUI() {
+    const btn = $('mapToolPreOptimize');
+    if (!btn) return;
+    btn.disabled = !preOptimizeSnapshot;
+    btn.textContent = showingPreOptimizeRoute ? t('mapToolBackToOptimized') : t('mapToolPreOptimize');
+    btn.classList.toggle('active', showingPreOptimizeRoute);
+  }
+
+  async function togglePreOptimizeRoute() {
+    if (showingPreOptimizeRoute) { restorePreOptimizeRoute(); return; }
+    if (!preOptimizeSnapshot || !lastRoute) return;
+    stopAnimation();
+    resetPicking();
+
+    if (!preOptimizeRouteCache) {
+      const btn = $('mapToolPreOptimize');
+      btn.disabled = true;
+      try {
+        const res = await fetch('/api/route', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            addresses: preOptimizeSnapshot.addresses, mode: 'driving', roundTrip: preOptimizeSnapshot.roundTrip,
+          }),
+        });
+        const data = await res.json();
+        if (!res.ok) { updatePreOptimizeButtonUI(); return; }
+        preOptimizeRouteCache = withDisplayLabels(data, preOptimizeSnapshot.labels);
+      } catch (err) {
+        updatePreOptimizeButtonUI();
+        return;
+      }
+    }
+
+    savedOptimizedState = { lastRoute, routeIsOptimized, routeCumulative, routeStopMarkers };
+    lastRoute = preOptimizeRouteCache;
+    routeIsOptimized = false; // "antes de otimizar" always renders in the 'modern' style's pre-optimize look
+    routeCumulative = null;
+    routeStopMarkers = null;
+    renderRoute(lastRoute.geometry);
+    renderStops(lastRoute.stops);
+    showingPreOptimizeRoute = true;
+    // Both tools assume lastRoute matches what's drawn — disabled while a
+    // route other than the "real" current one is on screen.
+    $('mapToolExclude').disabled = true;
+    $('mapToolAnimate').disabled = true;
+    updatePreOptimizeButtonUI();
+  }
+
+  function restorePreOptimizeRoute() {
+    if (!savedOptimizedState) return;
+    ({ lastRoute, routeIsOptimized, routeCumulative, routeStopMarkers } = savedOptimizedState);
+    savedOptimizedState = null;
+    showingPreOptimizeRoute = false;
+    renderRoute(lastRoute.geometry);
+    renderStops(lastRoute.stops);
+    $('mapToolExclude').disabled = false;
+    $('mapToolAnimate').disabled = false;
+    updatePreOptimizeButtonUI();
   }
 
   function retranslate() {
     if (map && map.getLayer('excluded-segments-label-layer')) {
       map.setLayoutProperty('excluded-segments-label-layer', 'text-field', '🚧 ' + t('blockedRoadLabel'));
     }
+    updatePreOptimizeButtonUI();
     updateToolbarUI();
     updateAnimationUI();
     if (lastRequestParams) refreshActiveRestrictions();
@@ -1373,28 +1670,50 @@
 
     $('mapToolSelect').addEventListener('click', () => { stopAnimation(); resetPicking(); });
     $('mapToolExclude').addEventListener('click', openBlockPanel);
-    $('mapToolRevert').addEventListener('click', revertLastBlock);
+    // First click just reveals the speed/pin-style controls + "▶ Play"
+    // (see updateAnimationUI()) instead of starting the animation right
+    // away; once a session is active this same button doubles as
+    // pause/resume, exactly as before.
     $('mapToolAnimate').addEventListener('click', () => {
-      if (!animationSessionActive) { startAnimation(); return; }
-      if (animating) pauseAnimation(); else resumeAnimation();
+      if (animationSessionActive) {
+        if (animating) pauseAnimation(); else resumeAnimation();
+        return;
+      }
+      animateControlsExpanded = true;
+      updateAnimationUI();
     });
+    $('mapToolAnimatePlay').addEventListener('click', startAnimation);
     $('mapToolAnimateStop').addEventListener('click', stopAnimation);
     $('animSpeedGroup').addEventListener('click', (e) => {
       const btn = e.target.closest('.anim-speed-btn');
       if (!btn) return;
       setAnimationSpeed(parseFloat(btn.getAttribute('data-speed')));
     });
+    $('pinStyleGroup').addEventListener('click', (e) => {
+      const btn = e.target.closest('[data-pin-style]');
+      if (!btn) return;
+      setPinStyle(btn.getAttribute('data-pin-style'));
+    });
+    updatePinStyleUI();
+    $('mapToolPreOptimize').addEventListener('click', togglePreOptimizeRoute);
+    updatePreOptimizeButtonUI();
+    $('mapStyleGroup').addEventListener('click', (e) => {
+      const btn = e.target.closest('.map-style-btn');
+      if (!btn) return;
+      setMapStyle(btn.getAttribute('data-style'));
+    });
+    updateMapStyleUI();
   }
 
   window.RouteMapUI = {
-    init, loadRoute, clear, retranslate,
+    init, loadRoute, clear, retranslate, setPreOptimizeSnapshot,
     // Pure geometry/permutation helpers, exposed only so they can be
     // unit-tested (see test/map-geometry.test.js). Nothing in the app
     // reads them through here — the map UI itself can't be exercised
     // without a live Valhalla, so these are the parts worth pinning.
     __test: {
       buildCumulative, pointAtDistance, computeStopMarkers,
-      sliceCoordsBetween, invertOrder, legEndForDistance,
+      sliceCoordsBetween, legEndForDistance,
     },
   };
 })();
