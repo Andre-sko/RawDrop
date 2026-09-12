@@ -215,6 +215,56 @@ async function valhallaRouteMixed(locations, restrictedFlags, { excludePolygons 
   return combineLegRoutes(legRoutes);
 }
 
+// Routes leg-by-leg like valhallaRouteMixed, but for the opposite reason:
+// here a leg MIGHT have no route at all under the given exclude_polygons
+// (e.g. several saved road blocks combined seal a stop off entirely — a
+// real fact about the underlying OSM road graph, not something this app
+// can route around by trying harder). Refusing to draw anything for the
+// whole trip over one bad leg would be worse than the alternative: every
+// other leg still routes normally, and the one leg with no path comes
+// back as a straight-line placeholder flagged `unreachable: true`, so
+// the caller can show exactly where the gap is instead of a dead end.
+async function valhallaRouteAllowingGaps(locations, { excludePolygons } = {}) {
+  const coords = await resolveLocations(locations);
+  const legPromises = [];
+  for (let i = 0; i < locations.length - 1; i++) {
+    legPromises.push(
+      valhallaRoute([locations[i], locations[i + 1]], { excludePolygons })
+        .then((route) => ({ ...route.legs[0], unreachable: false }))
+        .catch((err) => {
+          if (!(err instanceof ValhallaNoRouteError)) throw err;
+          const a = coords[i];
+          const b = coords[i + 1];
+          return {
+            geometry: { type: "LineString", coordinates: [[a.lng, a.lat], [b.lng, b.lat]] },
+            distanceMeters: 0, distanceText: "—",
+            durationSeconds: 0, durationText: "—",
+            unreachable: true,
+          };
+        })
+    );
+  }
+  const legs = await Promise.all(legPromises);
+
+  const fullCoordinates = legs.reduce((acc, leg, i) => {
+    const c = leg.geometry.coordinates;
+    return acc.concat(i === 0 ? c : c.slice(1));
+  }, []);
+  const distanceMeters = legs.reduce((sum, l) => sum + l.distanceMeters, 0);
+  const durationSeconds = legs.reduce((sum, l) => sum + l.durationSeconds, 0);
+
+  return {
+    geometry: { type: "LineString", coordinates: fullCoordinates },
+    distanceMeters,
+    distanceText: formatMetersText(distanceMeters),
+    durationSeconds,
+    durationText: formatSecondsText(durationSeconds),
+    legs,
+    stops: coords.map((c, i) => ({ lat: c.lat, lng: c.lng, address: locations[i] })),
+    hasUnreachableLegs: legs.some((l) => l.unreachable),
+  };
+}
+
 // Full NxN duration matrix via Valhalla's sources_to_targets service —
 // same shape/role as osrmDurationMatrix in src/routing.js, but with
 // exclude_polygons support so a road-segment exclusion is honoured
@@ -248,5 +298,6 @@ module.exports = {
   toGeoJsonLineString,
   valhallaRoute,
   valhallaRouteMixed,
+  valhallaRouteAllowingGaps,
   valhallaMatrix,
 };

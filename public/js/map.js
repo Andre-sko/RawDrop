@@ -45,6 +45,10 @@
   let stopPopup = null; // the one open stop-info popup, if any
 
   // ---------- "Bloquear via" ----------
+  // Matches server.js's own default — kept in sync there, not imported,
+  // since this is a static UI default and the server independently
+  // clamps/validates whatever the client actually sends.
+  const DEFAULT_BLOCK_BUFFER_METERS = 12;
   // How the user picks the segment: click the drawn route ('line'),
   // choose a pair of stops from the list ('stops'), or click two free
   // points on the map ('points' — the most flexible, can cut mid-leg).
@@ -53,6 +57,11 @@
   let blockWindowChoice = 'today'; // 'today' | 'date' | 'range' | 'forever'
   let pendingBlockWindow = null; // { type, startsAt, expiresAt } awaiting confirmation
   let pendingBlockReason = '';
+  // How far to each side of the clicked line the exclusion reaches — see
+  // server.js's /api/road-exclusion/preview comment on why this isn't a
+  // fixed constant: a wide buffer on a short, precise block can still
+  // swallow a real parallel street in a tight cluster of houses.
+  let pendingBlockBufferMeters = DEFAULT_BLOCK_BUFFER_METERS;
   // Where the user actually clicked on the route, so the server can
   // centre the blocked piece there when the leg is too long to block whole.
   let blockAnchorPoint = null;
@@ -176,7 +185,10 @@
     map.addLayer({
       id: 'preview-route-line-layer', type: 'line', source: 'preview-route-line',
       layout: { 'line-join': 'round', 'line-cap': 'round' },
-      paint: { 'line-color': '#4FAE7C', 'line-width': 4, 'line-dasharray': [1, 1.4] },
+      // A leg the preview found no route for at all (see runPreview's
+      // doc comment) is drawn in red instead of the usual preview green,
+      // same signal as the confirmed route-line-layer uses.
+      paint: { 'line-color': ['case', ['get', 'unreachable'], '#E2665B', '#4FAE7C'], 'line-width': 4, 'line-dasharray': [1, 1.4] },
     });
 
     map.addSource('stops', { type: 'geojson', data: EMPTY_FC });
@@ -288,9 +300,12 @@
       ? ['case', ['get', 'passed'], '#FFFFFF', ['get', 'optimized'], MODERN_AMBER, MODERN_GREY]
       : MODERN_AMBER);
 
+    // A leg with no route at all (see renderRoute's doc comment) always
+    // wins the colour regardless of pin style — it isn't a real road, so
+    // it must never read as just another optimized/unoptimized stretch.
     map.setPaintProperty('route-line-layer', 'line-color', modern
-      ? ['case', ['get', 'optimized'], MODERN_AMBER, MODERN_GREY]
-      : MODERN_AMBER);
+      ? ['case', ['get', 'unreachable'], '#E2665B', ['get', 'optimized'], MODERN_AMBER, MODERN_GREY]
+      : ['case', ['get', 'unreachable'], '#E2665B', true, MODERN_AMBER]);
 
     // The traced "already traveled" highlight during "Animar rota" — white
     // (today's look) in 'classic', muted grey in 'modern' so the untraveled
@@ -336,7 +351,7 @@
   // those is simpler and safer than trying to resume them mid-style-load.
   function redrawOverlaysAfterStyleSwitch() {
     if (lastRoute) {
-      renderRoute(lastRoute.geometry);
+      renderRoute(lastRoute, false);
       renderStops(lastRoute.stops);
     }
     renderExcludedSegments(inForceRestrictions);
@@ -493,17 +508,49 @@
 
   // ---------- Rendering ----------
 
-  function renderRoute(geometry) {
-    setSourceData('route-line', { type: 'Feature', geometry, properties: { optimized: routeIsOptimized } });
+  function computeBounds(coords) {
+    if (!coords || coords.length === 0) return null;
+    return coords.reduce((b, c) => b.extend(c), new maplibregl.LngLatBounds(coords[0], coords[0]));
+  }
+
+  // `route` is the full lastRoute-shaped object (geometry + legs), not
+  // just the geometry — a leg valhallaRouteAllowingGaps() couldn't find
+  // any path for (several saved road blocks combined sealing a stop off,
+  // see server.js's /api/route comment) carries `unreachable: true`, and
+  // that needs to reach the paint expression in applyPinStyle() as its
+  // own feature so it can be drawn in a visibly different colour instead
+  // of blending into the rest of the route as if it were a real road.
+  //
+  // `fitBounds` defaults to true (a genuinely new route is worth framing)
+  // but every caller that's really just refreshing the SAME route in
+  // place — removing/editing a restriction, toggling "Ver rota antes da
+  // otimização", switching map style — passes false, so the driver's own
+  // pan/zoom survives instead of snapping back on every small change.
+  function renderRoute(route, fitBounds = true) {
+    const geometry = route.geometry;
+    const legs = Array.isArray(route.legs) && route.legs.length > 0 ? route.legs : [{ geometry, unreachable: false }];
+    setSourceData('route-line', {
+      type: 'FeatureCollection',
+      features: legs.map((leg) => ({
+        type: 'Feature',
+        geometry: leg.geometry,
+        properties: { optimized: routeIsOptimized, unreachable: !!leg.unreachable },
+      })),
+    });
     updateRouteLineDasharray();
-    const coords = geometry.coordinates;
-    if (coords.length > 0) {
-      const bounds = coords.reduce(
-        (b, c) => b.extend(c),
-        new maplibregl.LngLatBounds(coords[0], coords[0])
-      );
-      map.fitBounds(bounds, { padding: 48, maxZoom: 15, duration: 300 });
+    if (fitBounds) {
+      const bounds = computeBounds(geometry.coordinates);
+      if (bounds) map.fitBounds(bounds, { padding: 48, maxZoom: 15, duration: 300 });
     }
+  }
+
+  // Public "recentre on the route" action — for when the driver has
+  // panned/zoomed away (to check a restriction, read a street name, etc.)
+  // and wants back without recalculating anything.
+  function recenterOnRoute() {
+    if (!map || !lastRoute) return;
+    const bounds = computeBounds(lastRoute.geometry.coordinates);
+    if (bounds) map.fitBounds(bounds, { padding: 48, maxZoom: 15, duration: 600 });
   }
 
   // /api/route echoes back exactly the (alias-resolved) string that was
@@ -624,23 +671,25 @@
         const id = e.currentTarget.getAttribute('data-id');
         try {
           await fetch('/api/road-restrictions/' + encodeURIComponent(id), { method: 'DELETE' });
-          if (lastRequestParams) await loadRoute(lastRequestParams);
+          if (lastRequestParams) await loadRoute({ ...lastRequestParams, preserveView: true });
         } catch (err) { /* falha silenciosa — a lista fica como estava */ }
       });
     });
   }
 
   // Turns the server's "no alternative route" into something the driver
-  // can act on. Nearly always the block has sealed off one delivery —
-  // its own doorstep is inside the segment that was just drawn — and
-  // then no detour exists for it at all, so the fix is to move the block
-  // rather than to look for another way round.
+  // can act on. Nearly always the block has sealed off one delivery — not
+  // necessarily because its polygon covers the doorstep (it usually cuts
+  // the street short of it instead, see server.js's comment on
+  // blockedByNewBlock), but because the new block is the whole reason no
+  // detour exists — so the fix is to move/shorten IT, not to go hunting
+  // through already-saved blocks that have nothing to do with it.
   function blockErrorMessage(data){
     const stranded = Array.isArray(data && data.unreachable) ? data.unreachable : [];
     if(stranded.length === 0) return (data && data.error) || t('mapPreviewError');
 
     const names = stranded.map(s => s.address).join(', ');
-    return stranded.some(s => s.insideNewBlock)
+    return stranded.some(s => s.blockedByNewBlock)
       ? t('blockSealsStopInside', {stops: names})
       : t('blockSealsStopElsewhere', {stops: names});
   }
@@ -934,6 +983,7 @@
     blockPanelOpen = false;
     pendingBlockWindow = null;
     pendingBlockReason = '';
+    pendingBlockBufferMeters = DEFAULT_BLOCK_BUFFER_METERS;
     pendingPreview = null;
     blockAnchorPoint = null;
     setSourceData('pick-points', EMPTY_FC);
@@ -1220,6 +1270,9 @@
         '<p style="margin:0 0 14px;color:var(--text);font-size:14px;">' + escapeHtml(t('confirmExcludeQuestion')) + '</p>' +
         '<label class="field-label">' + escapeHtml(t('blockReasonLabel')) + '</label>' +
         '<input type="text" id="blockReasonInput" placeholder="' + escapeHtml(t('blockReasonPlaceholder')) + '" style="margin-bottom:14px;" />' +
+        '<label class="field-label">' + escapeHtml(t('blockWidthLabel')) + '</label>' +
+        '<input type="number" id="blockWidthInput" min="2" max="50" step="1" value="' + pendingBlockBufferMeters + '" style="margin-bottom:2px;" />' +
+        '<p class="hint" style="margin-top:0;margin-bottom:14px;">' + escapeHtml(t('blockWidthHint')) + '</p>' +
         '<label class="field-label">' + escapeHtml(t('blockDurationLabel')) + '</label>' +
         '<div class="block-duration-group" id="blockDurationGroup">' + durationButtons + '</div>' +
         '<div class="block-field-pair" id="blockDateFields" style="display:none;">' +
@@ -1257,6 +1310,8 @@
       }
       pendingBlockWindow = blockWindow;
       pendingBlockReason = $('blockReasonInput').value.trim();
+      const widthVal = parseFloat($('blockWidthInput').value);
+      pendingBlockBufferMeters = Number.isFinite(widthVal) ? widthVal : DEFAULT_BLOCK_BUFFER_METERS;
       // A block that hasn't started yet must not re-optimize today's
       // route around a road that's still open — it is only saved, and
       // starts applying by itself once its window opens.
@@ -1333,6 +1388,7 @@
           pointA: pickedA, pointB: pickedB,
           reason: pendingBlockReason,
           anchorPoint: blockAnchorPoint,
+          bufferMeters: pendingBlockBufferMeters,
           scheduleOnly: true,
         }),
       });
@@ -1406,6 +1462,7 @@
           pointA: pickedA, pointB: pickedB,
           reason: pendingBlockReason,
           anchorPoint: blockAnchorPoint,
+          bufferMeters: pendingBlockBufferMeters,
         }),
       });
       const data = await res.json();
@@ -1417,10 +1474,23 @@
 
       pendingPreview = data;
       setSourceData('excluded-segments', { type: 'FeatureCollection', features: [{ type: 'Feature', geometry: data.excludedSegment, properties: {} }] });
-      setSourceData('preview-route-line', { type: 'Feature', geometry: data.newRoute.geometry, properties: {} });
+      const previewLegs = Array.isArray(data.newRoute.legs) && data.newRoute.legs.length > 0
+        ? data.newRoute.legs
+        : [{ geometry: data.newRoute.geometry, unreachable: false }];
+      setSourceData('preview-route-line', {
+        type: 'FeatureCollection',
+        features: previewLegs.map((leg) => ({ type: 'Feature', geometry: leg.geometry, properties: { unreachable: !!leg.unreachable } })),
+      });
 
       const formatDistance = (m) => (m >= 1000 ? (m / 1000).toFixed(1) + ' km' : Math.round(m) + ' m');
       const notices =
+        // A stop the combined blocks seal off entirely — no longer a hard
+        // refusal (see server.js's /api/road-exclusion/preview comment on
+        // why), just a warning shown alongside the normal comparison so
+        // the driver can still choose "Aplicar nova rota" if that's fine.
+        (data.unreachable && data.unreachable.length > 0
+          ? '<p class="hint" style="color:var(--red);">⚠ ' + escapeHtml(blockErrorMessage(data)) + '</p>'
+          : '') +
         (data.trimmed
           ? '<p class="hint" style="color:var(--amber-dim);">⚠ ' + escapeHtml(t('blockTrimmedInfo', {
               blocked: formatDistance(data.blockedMeters), requested: formatDistance(data.requestedMeters),
@@ -1581,7 +1651,14 @@
       routeIsOptimized = !!params.optimized;
       routeCumulative = null; // rebuilt lazily for the new geometry
       routeStopMarkers = null;
-      renderRoute(lastRoute.geometry);
+      // params.preserveView: a recalculation triggered BEHIND the scenes
+      // by something the driver did while already looking at the map
+      // (removing/editing a road restriction — see its ✕ handler below) —
+      // the addresses are the same, so snapping the view back to fit the
+      // whole route on every such tweak would fight whatever they just
+      // panned/zoomed to. A genuinely new "Calcular"/"Otimizar" from the
+      // form still frames the route as before.
+      renderRoute(lastRoute, !params.preserveView);
       renderStops(lastRoute.stops);
       await refreshActiveRestrictions();
     } catch (err) {
@@ -1668,7 +1745,7 @@
     routeIsOptimized = false; // "antes de otimizar" always renders in the 'modern' style's pre-optimize look
     routeCumulative = null;
     routeStopMarkers = null;
-    renderRoute(lastRoute.geometry);
+    renderRoute(lastRoute, false); // comparing in place, same area as before
     renderStops(lastRoute.stops);
     showingPreOptimizeRoute = true;
     // Both tools assume lastRoute matches what's drawn — disabled while a
@@ -1683,7 +1760,7 @@
     ({ lastRoute, routeIsOptimized, routeCumulative, routeStopMarkers } = savedOptimizedState);
     savedOptimizedState = null;
     showingPreOptimizeRoute = false;
-    renderRoute(lastRoute.geometry);
+    renderRoute(lastRoute, false); // comparing in place, same area as before
     renderStops(lastRoute.stops);
     $('mapToolExclude').disabled = false;
     $('mapToolAnimate').disabled = false;
@@ -1706,6 +1783,7 @@
 
     $('mapToolSelect').addEventListener('click', () => { stopAnimation(); resetPicking(); });
     $('mapToolExclude').addEventListener('click', openBlockPanel);
+    $('mapToolRecenter').addEventListener('click', recenterOnRoute);
     // First click just reveals the speed/pin-style controls + "▶ Play"
     // (see updateAnimationUI()) instead of starting the animation right
     // away; once a session is active this same button doubles as

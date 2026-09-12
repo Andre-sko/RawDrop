@@ -32,6 +32,11 @@
 </head>
 <body>
 
+<div id="scrollNav" class="scroll-nav">
+  <button type="button" id="scrollTopBtn" class="scroll-nav-btn" data-i18n-title="scrollTopTitle" title="Ir para o topo">▲</button>
+  <button type="button" id="scrollBottomBtn" class="scroll-nav-btn" data-i18n-title="scrollBottomTitle" title="Ir para o fundo">▼</button>
+</div>
+
 <header>
   <div class="logo-wrap">
     <img src="/logo.png" alt="" width="44" height="44" class="logo-img" />
@@ -205,6 +210,7 @@ Torre de Belém, Lisboa"></textarea>
             <button class="map-tool-btn active" id="mapToolSelect" type="button" data-i18n="mapToolSelect">✋ Selecionar</button>
             <button class="map-tool-btn" id="mapToolExclude" type="button" data-i18n="mapToolExclude">🚧 Bloquear via</button>
             <button class="map-tool-btn" id="mapToolAnimate" type="button" data-i18n="mapToolAnimate">▶️ Animar rota</button>
+            <button class="map-tool-btn" id="mapToolRecenter" type="button" title="Centrar no mapa a rota inteira" data-i18n="mapToolRecenter">🎯 Centrar rota</button>
             <div id="pinStyleGroup" style="display:none;gap:8px;">
               <button class="map-tool-btn" id="pinStyleClassic" type="button" data-pin-style="classic" data-i18n="pinStyleClassic">Clássico</button>
               <button class="map-tool-btn" id="pinStyleModern" type="button" data-pin-style="modern" data-i18n="pinStyleModern">Moderno</button>
@@ -1308,7 +1314,7 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
     return { addresses: stops, deadlines: stopDeadlines, roundTrip: false };
   }
 
-  async function runCalculate(optimized = false){
+  async function runCalculate(optimized = false, preserveView = false){
     clearStatus();
     const { addresses: rawAddresses, deadlines, roundTrip } = buildTextAddresses();
     const startTime = $('startTime').value;
@@ -1456,7 +1462,7 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
     btn.disabled = false;
     btn.textContent = t('calcBtnText');
     refreshCacheStats(); // a rota que acabou de correr provavelmente adicionou entradas
-    loadRouteOnMap(optimized); // não bloqueia o resto do fluxo — o mapa é só um extra visual
+    loadRouteOnMap(optimized, preserveView); // não bloqueia o resto do fluxo — o mapa é só um extra visual
   }
 
   // ---------- Map (route display + "Excluir troço") ----------
@@ -1467,7 +1473,7 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
   // `optimized` just tells map.js whether this route is the result of
   // "Reorganizar rota" / applying an alternative (vs. a plain recalculation),
   // so its "Moderno" pin style can distinguish before/after optimizing.
-  async function loadRouteOnMap(optimized = false){
+  async function loadRouteOnMap(optimized = false, preserveView = false){
     if(!window.RouteMapUI) return;
     const { addresses: rawAddresses, deadlines, roundTrip } = buildTextAddresses();
     if(rawAddresses.length < 2){ window.RouteMapUI.clear(); return; }
@@ -1492,7 +1498,7 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
     const restricted = rawAddresses.map(addr => !!findBlockedMatch(addr));
 
     await window.RouteMapUI.loadRoute({
-      addresses: locations, roundTrip, deadlines, startMinutes, stopMinutes: stopMinutesVal, optimized, restricted,
+      addresses: locations, roundTrip, deadlines, startMinutes, stopMinutes: stopMinutesVal, optimized, restricted, preserveView,
       // What's actually typed in the address box (e.g. an alias name) —
       // used for every on-map display instead of `locations`, which can
       // be a bare "lat,lng" when an alias points at raw coordinates.
@@ -1515,11 +1521,18 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
     refreshAliasPicker();
     refreshBlockedPicker();
     showStatus(t('optimizeReorderedInfo'), 'info');
-    await runCalculate(true); // já chama loadRouteOnMap() no fim
+    // preserveView: the driver was just looking at this exact spot on the
+    // map to confirm the block — snapping the view back to fit the whole
+    // route right after would undo the very thing they were doing.
+    await runCalculate(true, true); // já chama loadRouteOnMap() no fim
   }
   window.applyReorderedRoute = applyReorderedRoute;
 
   $('calcBtn').addEventListener('click', () => runCalculate());
+
+  // ---------- Scroll to top/bottom ----------
+  $('scrollTopBtn').addEventListener('click', () => window.scrollTo({ top: 0, behavior: 'smooth' }));
+  $('scrollBottomBtn').addEventListener('click', () => window.scrollTo({ top: document.body.scrollHeight, behavior: 'smooth' }));
 
   // ---------- Share / copy Google Maps link ----------
   // If there's an alias coordinate, the link uses it directly (already

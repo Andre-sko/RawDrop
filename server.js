@@ -35,7 +35,7 @@ const {
 } = require("./src/api-log");
 const { geocodeAddressBest } = require("./src/geocoding");
 const { osrmSingleLeg, buildMixedDurationMatrix, overlayWalkingMatrix, resolveToCoords } = require("./src/routing");
-const { valhallaRoute, valhallaRouteMixed, valhallaMatrix, ValhallaNoRouteError } = require("./src/valhalla");
+const { valhallaRoute, valhallaRouteMixed, valhallaRouteAllowingGaps, valhallaMatrix, ValhallaNoRouteError } = require("./src/valhalla");
 const {
   snapPointToRoute, sliceRouteBetween, bufferSegment, trimSegmentToLength,
   polygonPerimeterMeters, lineLengthMeters, pointInsidePolygon,
@@ -1329,10 +1329,12 @@ app.post("/api/route", async (req, res) => {
     : addresses.map(() => false);
 
   let relevantRestrictions = [];
+  let polygons = [];
   try {
     const points = await resolveAddressPoints(addresses);
     relevantRestrictions = restrictionsNear(points, listActiveRestrictions());
-    const { polygons, skipped } = buildExcludePolygonsPayload(relevantRestrictions);
+    let skipped;
+    ({ polygons, skipped } = buildExcludePolygonsPayload(relevantRestrictions));
     // "Endereços interditos" (secção 04) stops need their leg(s) walked
     // instead of driven — see valhallaRouteMixed's doc comment. Only
     // taken when at least one is actually in this request; the common
@@ -1367,14 +1369,20 @@ app.post("/api/route", async (req, res) => {
         const withReason = hits.find((r) => r.reason) || hits[0];
         blocked.push({ address: addresses[idx], reason: withReason.reason });
       });
-      if (blocked.length > 0) {
-        const names = blocked.map((b) => (b.reason ? `${b.address} (${b.reason})` : b.address)).join("; ");
-        return res.status(422).json({
-          error: `Nao e possivel chegar a: ${names} — o proprio endereco fica dentro de um troco bloqueado.`,
-          blockedAddresses: blocked,
-        });
+
+      // A stop the saved blocks combine to seal off entirely is the
+      // driver's call to make, not this endpoint's — several blocks can
+      // legitimately overlap and still each be exactly what's wanted
+      // (see /api/road-exclusion/preview's own comment on this). So this
+      // never hard-fails the map: route leg by leg instead, so only the
+      // sealed-off stretch comes back flagged `unreachable`, and every
+      // other leg still draws normally.
+      try {
+        const gapped = await valhallaRouteAllowingGaps(addresses, { excludePolygons: polygons });
+        return res.json({ ...gapped, blockedAddresses: blocked });
+      } catch (gapErr) {
+        return res.status(500).json({ error: gapErr.message || err.message });
       }
-      return res.status(422).json({ error: err.message });
     }
     res.status(500).json({ error: err.message || "Falha ao calcular a rota no Valhalla" });
   }
@@ -1400,8 +1408,22 @@ app.post("/api/road-exclusion/preview", async (req, res) => {
 
   const {
     addresses, roundTrip, deadlines, startMinutes, stopMinutes,
-    routeGeometry, previousRoute, pointA, pointB, reason, scheduleOnly, anchorPoint,
+    routeGeometry, previousRoute, pointA, pointB, reason, scheduleOnly, anchorPoint, bufferMeters,
   } = req.body || {};
+
+  // How far to each side of the clicked line the exclusion actually
+  // reaches — NOT the same thing as how long the line itself is
+  // (MAX_BLOCK_SEGMENT_METERS/trimSegmentToLength below). A fixed 12m
+  // here used to eat a real parallel street a short block was never
+  // meant to touch, in tight clusters where two paths run within a car's
+  // width of each other — so this is now the caller's call, clamped to a
+  // sane range rather than a silent constant.
+  const MIN_BLOCK_BUFFER_METERS = 2;
+  const MAX_BLOCK_BUFFER_METERS = 50;
+  const DEFAULT_BLOCK_BUFFER_METERS = 12;
+  const blockBufferMeters = typeof bufferMeters === "number" && Number.isFinite(bufferMeters)
+    ? Math.min(MAX_BLOCK_BUFFER_METERS, Math.max(MIN_BLOCK_BUFFER_METERS, bufferMeters))
+    : DEFAULT_BLOCK_BUFFER_METERS;
 
   if (!Array.isArray(addresses) || addresses.length < 2) {
     return res.status(400).json({ error: "sao precisos pelo menos 2 enderecos" });
@@ -1430,7 +1452,7 @@ app.post("/api/road-exclusion/preview", async (req, res) => {
     // Valhalla's total exclude_polygons budget on its own. Keeping the
     // piece around the click blocks the same road just as effectively.
     const excludedSegment = trimSegmentToLength(fullSegment, MAX_BLOCK_SEGMENT_METERS, anchorPoint);
-    const excludePolygon = bufferSegment(excludedSegment, 12);
+    const excludePolygon = bufferSegment(excludedSegment, blockBufferMeters);
     const requestedMeters = Math.round(lineLengthMeters(fullSegment));
     const blockedMeters = Math.round(lineLengthMeters(excludedSegment));
     const trimmed = blockedMeters < requestedMeters - 1;
@@ -1474,33 +1496,61 @@ app.post("/api/road-exclusion/preview", async (req, res) => {
     const order = optimizeOrder(matrix, !!roundTrip, { deadlines: deadlineArr, startMinutes: startMin, stopMinutes: stopMin });
 
     // If the best order still has to cross a pair the exclusion made
-    // impossible, there is no valid alternative — but "no alternative
-    // found" on its own reads as "the map is wrong" and leaves the
-    // driver nothing to do about it. Nearly always the block has sealed
-    // off a specific delivery: the buffered segment covers the last
-    // piece of road to its door, and then no detour exists for that
-    // stop however well the driver knows the area. Name it, and say
-    // whether the new block is what did it, so the answer is "move the
-    // block off number 47" instead of a dead end.
+    // impossible, there is no valid alternative route THROUGH that
+    // stop — but that is the driver's call to make, not this endpoint's:
+    // several blocks saved for the same day can legitimately combine to
+    // seal a stop off on paper while the driver still knows a way in the
+    // map data doesn't have. So this is reported as a warning attached to
+    // an otherwise normal preview, never a hard failure — the driver
+    // decides whether to still apply it (e.g. deliver that one on foot,
+    // or accept it's unreachable today) instead of being unable to save
+    // the block at all until every other saved block is untangled first.
+    // Nearly always the block has sealed off a specific delivery: the
+    // buffered segment covers the last piece of road to its door, and
+    // then no detour exists for that stop however well the driver knows
+    // the area. Name it, and say whether the new block is what did it,
+    // so the answer is "move the block off number 47" instead of a dead
+    // end.
     const isImpossible = order.some((idx, i) => i > 0 && matrix[order[i - 1]][idx] === Infinity);
+    let unreachable = null;
     if (isImpossible) {
       const stranded = unreachableStops(matrix, { lastIsFinal: !roundTrip });
-      const details = stranded.map((idx) => ({
+      // "Inside the new block's own polygon" is NOT the same question as
+      // "did the new block cause this" — a block almost never covers a
+      // doorstep exactly, it cuts the street a bit short of it, which
+      // pointInsidePolygon reports as false. That used to make this
+      // blame "the blocks you already saved" whenever the stop wasn't
+      // LITERALLY inside the new polygon, even with zero other
+      // restrictions active — sending the driver hunting for a
+      // nonexistent culprit instead of the block they just drew. So
+      // check it directly: would this stop still be stranded with the
+      // new block taken back OUT, leaving only what was already saved?
+      // Still stranded → the saved ones are genuinely responsible.
+      // Reachable again → this new block is the whole story, regardless
+      // of whether it happens to sit on the doorstep or just the one
+      // road leading to it.
+      const matrixWithoutNewBlock = activePolygons.length > 0
+        ? await valhallaMatrix(addresses, { excludePolygons: activePolygons })
+        : null;
+      const strandedWithoutNewBlock = matrixWithoutNewBlock
+        ? new Set(unreachableStops(matrixWithoutNewBlock, { lastIsFinal: !roundTrip }))
+        : new Set();
+      unreachable = stranded.map((idx) => ({
         index: idx,
         address: addresses[idx],
-        // Inside the segment the driver just drew, as opposed to cut off
-        // by a block saved earlier — a different thing to fix.
         insideNewBlock: pointInsidePolygon(points[idx], excludePolygon),
+        blockedByNewBlock: !strandedWithoutNewBlock.has(idx),
       }));
-      return res.status(422).json({
-        error: "Nao foi encontrada uma rota alternativa valida para este troco.",
-        unreachable: details,
-      });
     }
 
     const reorderedAddresses = order.map((i) => addresses[i]);
     const lateStops = computeLatenessReport(order, matrix, deadlineArr, startMin, stopMin);
-    const newRoute = await valhallaRoute(reorderedAddresses, { excludePolygons: allExcludePolygons });
+    // The whole-trip call throws if ANY leg has no route at all, which
+    // would hide a perfectly good route behind the one sealed-off stop —
+    // route leg by leg instead so only that stretch comes back flagged.
+    const newRoute = unreachable
+      ? await valhallaRouteAllowingGaps(reorderedAddresses, { excludePolygons: allExcludePolygons })
+      : await valhallaRoute(reorderedAddresses, { excludePolygons: allExcludePolygons });
 
     const prevDistance = previousRoute && typeof previousRoute.distanceMeters === "number" ? previousRoute.distanceMeters : null;
     const prevDuration = previousRoute && typeof previousRoute.durationSeconds === "number" ? previousRoute.durationSeconds : null;
@@ -1515,6 +1565,7 @@ app.post("/api/road-exclusion/preview", async (req, res) => {
       requestedMeters,
       skippedRestrictions: skipped,
       newRoute,
+      unreachable,
       order,
       reorderedAddresses,
       lateStops,

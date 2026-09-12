@@ -77,7 +77,18 @@ describe("road segment exclusion (Valhalla)", () => {
     } finally { await s.stop(); }
   });
 
-  test("preview reports 'no alternative' clearly instead of returning a broken route", async () => {
+  // Regression: this used to hard-refuse (422) whenever the new block
+  // left a stop with no alternative route, which also meant a driver
+  // could never SAVE a block that, combined with other blocks already
+  // saved for the same day, happened to seal a stop off — even when
+  // that combination is exactly what they intended (e.g. several real
+  // closures reported for today that just happen to box a delivery in).
+  // The check is real information (Valhalla's road graph genuinely has
+  // no path), so it's kept — as a warning attached to an otherwise
+  // normal preview, not a wall stopping the block from being saved at
+  // all. The stranded stop's own leg comes back flagged `unreachable`
+  // instead of breaking the whole comparison.
+  test("preview reports 'no alternative' as a warning, not a wall stopping the block from being saved", async () => {
     const s = await startServer({
       env: { VALHALLA_URL: "http://localhost:8002", APP_PASSWORD: "" },
       config: { valhallaNoRoute: true },
@@ -93,11 +104,70 @@ describe("road segment exclusion (Valhalla)", () => {
         pointA: POINT_A,
         pointB: POINT_B,
       });
-      assert.strictEqual(preview.status, 422);
-      assert.ok(/alternativa/i.test(preview.body.error));
+      assert.strictEqual(preview.status, 200);
+      assert.ok(Array.isArray(preview.body.unreachable) && preview.body.unreachable.length > 0, "devia sinalizar a paragem presa");
+      assert.ok(preview.body.newRoute.legs.some((l) => l.unreachable), "a perna sem caminho deve vir assinalada, nao esconder a rota toda");
+      // Regression: with zero other restrictions active, the new block
+      // is necessarily the whole story — flagging it any other way sends
+      // the driver hunting for an "already saved" block that doesn't
+      // exist (see blockedByNewBlock's doc comment in server.js).
+      assert.ok(
+        preview.body.unreachable.every((u) => u.blockedByNewBlock === true),
+        "sem outros bloqueios ativos, a culpa so pode ser do bloqueio novo"
+      );
+
+      // Confirming it anyway must still work — the driver's call, not a
+      // dead end. (Preview itself never persists either way.)
+      const confirm = await postJson(s.baseUrl, "/api/road-exclusion/confirm", {
+        draftRestriction: preview.body.draftRestriction,
+      });
+      assert.strictEqual(confirm.status, 200);
 
       const active = await getJson(s.baseUrl, "/api/road-restrictions");
-      assert.strictEqual(active.body.length, 0, "nada deve ficar persistido quando nao ha alternativa");
+      assert.strictEqual(active.body.length, 1, "o bloqueio tem de poder ser gravado mesmo sem alternativa");
+    } finally { await s.stop(); }
+  });
+
+  // Regression: blaming "the blocks you already saved" was based purely
+  // on whether the stranded stop's own point sat inside the NEW block's
+  // polygon — but a block almost never covers a doorstep exactly, it
+  // cuts the street a bit short of it, which reads as "not inside" even
+  // when the new block is 100% the cause. That sent a driver who had
+  // ZERO other active restrictions on a wild goose chase looking for a
+  // saved block that never existed. This checks the other direction
+  // too: when an already-saved block is genuinely what's responsible
+  // (still stranded even with the new one taken back out), it must
+  // still get the blame, not the new one.
+  test("blames an already-saved block, not the new one, when the stop was stranded before it too", async () => {
+    const s = await startServer({
+      env: { VALHALLA_URL: "http://localhost:8002", APP_PASSWORD: "" },
+      config: { valhallaNoRoute: true },
+    });
+    try {
+      const before = await postJson(s.baseUrl, "/api/route", { addresses: [A, B] });
+      const routeGeometry = { type: "LineString", coordinates: [[7.4470, 46.9480], [7.4480, 46.9490]] };
+      const previousRoute = { distanceMeters: before.body.distanceMeters, durationSeconds: before.body.durationSeconds };
+
+      // First block: nothing else active yet, so (per the test above)
+      // this one rightly takes the blame — and, per the earlier fix,
+      // confirming it despite the warning still works.
+      const firstPreview = await postJson(s.baseUrl, "/api/road-exclusion/preview", {
+        addresses: [A, B], routeGeometry, previousRoute, pointA: POINT_A, pointB: POINT_B,
+      });
+      await postJson(s.baseUrl, "/api/road-exclusion/confirm", { draftRestriction: firstPreview.body.draftRestriction });
+
+      // Second, separate draft block on the same pair — the stop is
+      // already stranded because of the FIRST one alone, so this one
+      // must not take the blame.
+      const secondPreview = await postJson(s.baseUrl, "/api/road-exclusion/preview", {
+        addresses: [A, B], routeGeometry, previousRoute, pointA: POINT_A, pointB: POINT_B,
+      });
+      assert.strictEqual(secondPreview.status, 200);
+      assert.ok(secondPreview.body.unreachable.length > 0);
+      assert.ok(
+        secondPreview.body.unreachable.every((u) => u.blockedByNewBlock === false),
+        "ja estava sem acesso so com o bloqueio ja guardado — a culpa nao e do bloqueio novo"
+      );
     } finally { await s.stop(); }
   });
 
@@ -224,6 +294,43 @@ describe("road segment exclusion (Valhalla)", () => {
       assert.ok(
         Number.isFinite(optimized.body.optimizedSeconds),
         "devia ser finito: a perna A-B tem de usar a duracao a pe, nao a Infinity do Valhalla"
+      );
+    } finally { await s.stop(); }
+  });
+
+  // Regression: loading the map for a route that includes a stop the
+  // SAVED restrictions combine to seal off used to 422 the whole request
+  // (see the "which address" naming added earlier) — useful for a stop
+  // whose own point sits inside one block's polygon, but wrong here: the
+  // block was deliberately confirmed knowing it left this stop stranded
+  // (previous test), so re-loading the map for it afterwards must still
+  // show the rest of the route, with just that leg flagged.
+  test("/api/route still draws the rest of the map when a saved block leaves one leg with no route", async () => {
+    const s = await startServer({
+      env: { VALHALLA_URL: "http://localhost:8002", APP_PASSWORD: "" },
+      config: { valhallaNoRoute: true },
+    });
+    try {
+      const before = await postJson(s.baseUrl, "/api/route", { addresses: [A, B] });
+      const preview = await postJson(s.baseUrl, "/api/road-exclusion/preview", {
+        addresses: [A, B],
+        routeGeometry: { type: "LineString", coordinates: [[7.4470, 46.9480], [7.4480, 46.9490]] },
+        previousRoute: { distanceMeters: before.body.distanceMeters, durationSeconds: before.body.durationSeconds },
+        pointA: POINT_A,
+        pointB: POINT_B,
+      });
+      await postJson(s.baseUrl, "/api/road-exclusion/confirm", { draftRestriction: preview.body.draftRestriction });
+
+      // Fresh /api/route, as loading the map does — no preview payload of
+      // its own, just the two addresses. The block confirmed above is
+      // already active and, per this mock, makes every excluded pair
+      // unreachable.
+      const reloaded = await postJson(s.baseUrl, "/api/route", { addresses: [A, B] });
+      assert.strictEqual(reloaded.status, 200, "uma paragem encurralada nao pode derrubar o resto do mapa");
+      assert.ok(reloaded.body.legs.some((l) => l.unreachable), "a perna sem caminho tem de vir assinalada");
+      assert.ok(
+        Array.isArray(reloaded.body.blockedAddresses) && reloaded.body.blockedAddresses.length > 0,
+        "devia continuar a dizer qual endereco ficou preso"
       );
     } finally { await s.stop(); }
   });
