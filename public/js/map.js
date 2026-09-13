@@ -38,11 +38,15 @@
   let preOptimizeRouteCache = null; // full /api/route response for that snapshot, once fetched
   let showingPreOptimizeRoute = false;
   let savedOptimizedState = null; // { lastRoute, routeIsOptimized, routeCumulative, routeStopMarkers } stashed while showing it
-  let mode = 'idle'; // 'idle' | 'block-line' | 'exclude-a' | 'exclude-b'
+  let mode = 'idle'; // 'idle' | 'block-line' | 'exclude-a' | 'exclude-b' | 'access-point'
   let pickedA = null; // [lng, lat]
   let pickedB = null;
   let pendingPreview = null; // last /api/road-exclusion/preview response, while its panel is open
   let stopPopup = null; // the one open stop-info popup, if any
+  // Address waiting for a manual access-point click (see "Marcar ponto de
+  // acesso manual" in the unreachable-stop notice) — set only while
+  // mode === 'access-point'.
+  let pendingAccessOverrideAddress = null;
 
   // ---------- "Bloquear via" ----------
   // Matches server.js's own default — kept in sync there, not imported,
@@ -971,6 +975,7 @@
     const hintKey = mode === 'block-line' ? 'mapHintPickLine'
       : mode === 'exclude-a' ? 'mapHintPickA'
       : mode === 'exclude-b' ? 'mapHintPickB'
+      : mode === 'access-point' ? 'mapHintPickAccessPoint'
       : null;
     hint.style.display = hintKey ? '' : 'none';
     if (hintKey) hint.textContent = t(hintKey);
@@ -986,6 +991,7 @@
     pendingBlockBufferMeters = DEFAULT_BLOCK_BUFFER_METERS;
     pendingPreview = null;
     blockAnchorPoint = null;
+    pendingAccessOverrideAddress = null;
     setSourceData('pick-points', EMPTY_FC);
     setSourceData('preview-route-line', EMPTY_FC);
     // Redraw the blocked-segment overlay from what is actually in force:
@@ -1218,6 +1224,12 @@
 
   function onMapClick(e) {
     if (mode === 'idle') return;
+
+    if (mode === 'access-point') {
+      confirmAccessOverride({ lat: e.lngLat.lat, lng: e.lngLat.lng });
+      return;
+    }
+
     const point = [e.lngLat.lng, e.lngLat.lat];
 
     if (mode === 'exclude-a') {
@@ -1444,6 +1456,59 @@
     $('mapDismissErrorBtn').addEventListener('click', resetPicking);
   }
 
+  // ---------- Manual access-point override ----------
+  // Lets the driver hand-pick a point for a stop Access Manager's
+  // automatic ring couldn't reach on its own (see findAccessibleRoute's
+  // doc comment in src/valhalla.js) — offered as a button next to that
+  // stop's name in the "unreachable" notice below, in runPreview().
+
+  function startAccessOverridePicking(address) {
+    pendingAccessOverrideAddress = address;
+    mode = 'access-point';
+    updateToolbarUI();
+    showComparisonPanel(
+      '<div class="totals-panel">' +
+        '<p class="hint">' + escapeHtml(t('accessOverridePickHint', { address })) + '</p>' +
+        '<div class="map-comparison-actions">' +
+          '<button class="btn-ghost" id="mapCancelAccessOverrideBtn">' + escapeHtml(t('cancelBtn')) + '</button>' +
+        '</div>' +
+      '</div>'
+    );
+    $('mapCancelAccessOverrideBtn').addEventListener('click', () => {
+      pendingAccessOverrideAddress = null;
+      mode = 'idle';
+      updateToolbarUI();
+      runPreview();
+    });
+  }
+
+  async function confirmAccessOverride(point) {
+    const address = pendingAccessOverrideAddress;
+    pendingAccessOverrideAddress = null;
+    mode = 'idle';
+    updateToolbarUI();
+    showComparisonPanel('<div class="totals-panel"><p style="margin:0;color:var(--text-dim);font-size:13.5px;">' + escapeHtml(t('mapPreviewLoading')) + '</p></div>');
+    try {
+      const res = await fetch('/api/access-overrides', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ address, point }),
+      });
+      if (!res.ok) {
+        const body = await res.json().catch(() => ({}));
+        showErrorPanel(body.error || t('mapPreviewError'));
+        return;
+      }
+    } catch (err) {
+      showErrorPanel(t('serverContactError'));
+      return;
+    }
+    // The saved point only takes effect on the NEXT preview request —
+    // findAccessibleRoute (src/valhalla.js) reads it fresh every call, so
+    // simply re-running the same preview is enough to pick it up.
+    await runPreview();
+  }
+
   async function runPreview() {
     showComparisonPanel('<div class="totals-panel"><p style="margin:0;color:var(--text-dim);font-size:13.5px;">' + escapeHtml(t('mapPreviewLoading')) + '</p></div>');
 
@@ -1489,7 +1554,14 @@
         // why), just a warning shown alongside the normal comparison so
         // the driver can still choose "Aplicar nova rota" if that's fine.
         (data.unreachable && data.unreachable.length > 0
-          ? '<p class="hint" style="color:var(--red);">⚠ ' + escapeHtml(blockErrorMessage(data)) + '</p>'
+          ? '<p class="hint" style="color:var(--red);">⚠ ' + escapeHtml(blockErrorMessage(data)) + '</p>' +
+            '<div class="map-comparison-actions" id="accessOverrideButtons" style="justify-content:flex-start;margin-bottom:10px;">' +
+              data.unreachable.map((s) =>
+                '<button type="button" class="btn-ghost access-override-btn" data-address="' + escapeHtml(s.address) + '">' +
+                  escapeHtml(t('markAccessPointBtn', { address: s.address })) +
+                '</button>'
+              ).join('') +
+            '</div>'
           : '') +
         (data.trimmed
           ? '<p class="hint" style="color:var(--amber-dim);">⚠ ' + escapeHtml(t('blockTrimmedInfo', {
@@ -1529,6 +1601,12 @@
           '</div>' +
         '</div>'
       );
+      if (data.unreachable && data.unreachable.length > 0) {
+        $('accessOverrideButtons').addEventListener('click', (e) => {
+          const btn = e.target.closest('.access-override-btn');
+          if (btn) startAccessOverridePicking(btn.getAttribute('data-address'));
+        });
+      }
       $('mapKeepPreviousBtn').addEventListener('click', () => {
         setSourceData('preview-route-line', EMPTY_FC);
         pendingPreview = null;

@@ -106,6 +106,7 @@ const DELIVERY_TIMES_FILE = path.join(DATA_DIR, "delivery-times.json");
 const GEOCODE_CACHE_FILE = path.join(DATA_DIR, "geocode-cache.json");
 const DISTANCE_CACHE_FILE = path.join(DATA_DIR, "distance-cache.json");
 const ROAD_RESTRICTIONS_FILE = path.join(DATA_DIR, "road-restrictions.json");
+const ACCESS_OVERRIDES_FILE = path.join(DATA_DIR, "access-overrides.json");
 
 // AI engine (Claude vision) for "Video → Address" — optional. Without
 // ANTHROPIC_API_KEY, the app still works, just with only the "local"
@@ -145,6 +146,7 @@ module.exports = {
   GEOCODE_CACHE_FILE,
   DISTANCE_CACHE_FILE,
   ROAD_RESTRICTIONS_FILE,
+  ACCESS_OVERRIDES_FILE,
   ANTHROPIC_MODEL,
   anthropic,
 };

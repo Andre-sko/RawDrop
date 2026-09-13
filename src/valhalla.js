@@ -15,6 +15,7 @@ const { VALHALLA_URL, ACCESS_CANDIDATE_RADIUS_M, ACCESS_CANDIDATE_COUNT } = requ
 const { resolveToCoords, formatMetersText, formatSecondsText } = require("./routing");
 const { pointInsidePolygon } = require("./routeGeometry");
 const { generateAccessCandidates } = require("./accessManager");
+const { getOverride: getAccessOverride } = require("./accessOverrides");
 
 // Valhalla error_codes that specifically mean "no path exists between
 // these locations under the given constraints" (as opposed to a bad
@@ -244,39 +245,74 @@ async function valhallaRouteMixed(locations, restrictedFlags, { excludePolygons 
 // on it — it's not an alternative to the thing that made the direct
 // point unreachable, it's the same problem.
 //
+// Validates one candidate access point with REAL routing (never assumed
+// from distance alone): a route from `originLoc` to it, and a "last mile"
+// from it to the actual address, under `lastMileOptions` — the only thing
+// that differs between the automatic ring (driven, same exclude_polygons
+// as the first leg — the candidate is just a different street the block
+// didn't touch) and a saved manual override (walked, no exclude_polygons
+// — the driver picked this point BECAUSE the van can't reach the door at
+// all, so the last stretch is on foot, same as "Endereços interditos").
+// Returns null (never throws) for a candidate with no route, so one bad
+// candidate never takes the caller's whole Promise.all down with it.
+async function tryAccessCandidate(originLoc, addressLoc, candidate, excludePolygons, lastMileOptions) {
+  const candidateLoc = `${candidate.lat},${candidate.lng}`;
+  try {
+    const [toCandidate, lastMile] = await Promise.all([
+      valhallaRoute([originLoc, candidateLoc], { excludePolygons }),
+      valhallaRoute([candidateLoc, addressLoc], lastMileOptions),
+    ]);
+    return { toCandidate, lastMile, cost: toCandidate.durationSeconds + lastMile.durationSeconds };
+  } catch (err) {
+    // A candidate genuinely having no route (ValhallaNoRouteError) is the
+    // expected, common case — silently "not viable". Anything else (a
+    // network hiccup, Valhalla briefly overloaded by this very burst of
+    // parallel requests, ...) must NOT be allowed to fail the whole rescue
+    // attempt: one flaky candidate out of six taking down the entire
+    // preview/route request — and, upstream, wiping the block's own line
+    // off the map when the request comes back 500 — would be far worse
+    // than just treating that one candidate as unusable and trying the
+    // rest.
+    if (!(err instanceof ValhallaNoRouteError)) {
+      console.warn(`Access Manager: candidato ${candidateLoc} falhou (${err.message}) — a tratar como nao viavel.`);
+    }
+    return null;
+  }
+}
+
 // Returns the cheapest reachable candidate (by combined duration), or
 // null if none of them work — the caller falls back to reporting the
 // stop as unreachable, exactly as it did before this existed.
+//
+// Manual override (src/accessOverrides.js): a point the driver picked by
+// hand for this exact address, tried BEFORE the automatic ring and, if it
+// still has a real route, used unconditionally — not just when it happens
+// to be cheapest. The driver picked it because they know it's the actual
+// way in (a legal stopping spot, the side street the door really faces),
+// which the automatic ring's blind 60m circle has no way to know; second-
+// guessing that with a cost comparison would defeat the point of letting
+// them override it at all. Its last mile is walked (see
+// tryAccessCandidate's doc comment) — if the map data has changed enough
+// that even that no longer has a route, this falls through to the
+// automatic ring exactly as if no override existed.
 async function findAccessibleRoute(originLoc, addressLoc, excludePolygons) {
   const [addressCoord] = await resolveLocations([addressLoc]);
+
+  const manualOverride = getAccessOverride(addressLoc);
+  if (manualOverride && manualOverride.point && !(excludePolygons || []).some((poly) => pointInsidePolygon(manualOverride.point, poly))) {
+    const viaManual = await tryAccessCandidate(originLoc, addressLoc, manualOverride.point, excludePolygons, { costing: "pedestrian" });
+    if (viaManual) {
+      console.log(`Access Manager: "${addressLoc}" usou o ponto de acesso manual guardado (custo=${Math.round(viaManual.cost / 60)}min).`);
+      return viaManual;
+    }
+    console.warn(`Access Manager: o ponto de acesso manual para "${addressLoc}" ja nao tem rota valida — a tentar o anel automatico.`);
+  }
+
   const candidates = generateAccessCandidates(addressCoord, ACCESS_CANDIDATE_RADIUS_M, ACCESS_CANDIDATE_COUNT)
     .filter((c) => !(excludePolygons || []).some((poly) => pointInsidePolygon(c, poly)));
 
   const attempts = await Promise.all(
-    candidates.map(async (candidate) => {
-      const candidateLoc = `${candidate.lat},${candidate.lng}`;
-      try {
-        const [toCandidate, lastMile] = await Promise.all([
-          valhallaRoute([originLoc, candidateLoc], { excludePolygons }),
-          valhallaRoute([candidateLoc, addressLoc], { excludePolygons }),
-        ]);
-        return { toCandidate, lastMile, cost: toCandidate.durationSeconds + lastMile.durationSeconds };
-      } catch (err) {
-        // A candidate genuinely having no route (ValhallaNoRouteError) is
-        // the expected, common case — silently "not viable". Anything
-        // else (a network hiccup, Valhalla briefly overloaded by this
-        // very burst of parallel requests, ...) must NOT be allowed to
-        // fail the whole rescue attempt: one flaky candidate out of six
-        // taking down the entire preview/route request — and, upstream,
-        // wiping the block's own line off the map when the request comes
-        // back 500 — would be far worse than just treating that one
-        // candidate as unusable and trying the rest.
-        if (!(err instanceof ValhallaNoRouteError)) {
-          console.warn(`Access Manager: candidato ${candidateLoc} falhou (${err.message}) — a tratar como nao viavel.`);
-        }
-        return null;
-      }
-    })
+    candidates.map((candidate) => tryAccessCandidate(originLoc, addressLoc, candidate, excludePolygons, { excludePolygons }))
   );
 
   const viable = attempts.filter(Boolean);

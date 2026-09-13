@@ -173,6 +173,44 @@ describe("2-opt alone can get stuck where Or-opt does not", () => {
   });
 });
 
+// Regression: moving a single stop can cost more than it saves — it still
+// pays for breaking its own two edges — even when moving it TOGETHER with
+// its immediate neighbour, as a pair, is cheaper than the round as it
+// stands. A single-stop Or-opt pass structurally cannot ask "is moving
+// these two together worth it", only "is moving this one worth it", so it
+// can settle for a route that leaves two genuinely close stops on
+// opposite sides of a much bigger round — the real complaint that
+// motivated this ("moradas 18 e 109 estao proximas mas o otimizador
+// nao as junta"). Or-opt over chains of 2-3 consecutive stops, not just
+// single stops, is what closes that gap.
+//
+// This exact matrix (random 2D points) was found by brute-force search
+// specifically because 2-opt + single-stop Or-opt settles for a worse
+// route (1590) than adding chain Or-opt does (1451).
+describe("single-stop Or-opt alone can get stuck where chain Or-opt does not", () => {
+  const D2 = [
+    [0, 117, 331, 484, 171, 373, 108, 391, 272, 190],
+    [117, 0, 277, 418, 196, 275, 88, 294, 155, 223],
+    [331, 277, 0, 643, 470, 156, 224, 475, 287, 496],
+    [484, 418, 643, 0, 356, 545, 506, 183, 358, 361],
+    [171, 196, 470, 356, 0, 464, 253, 325, 296, 27],
+    [373, 275, 156, 545, 464, 0, 272, 365, 198, 491],
+    [108, 88, 224, 506, 253, 272, 0, 377, 216, 277],
+    [391, 294, 475, 183, 325, 365, 377, 0, 189, 343],
+    [272, 155, 287, 358, 296, 198, 216, 189, 0, 323],
+    [190, 223, 496, 361, 27, 491, 277, 343, 323, 0],
+  ];
+
+  test("finds the cheaper route a single-stop-Or-opt-only pass settles short of", () => {
+    const order = optimizeOrder(D2, false);
+    const cost = routeSeconds(D2, order);
+    assert.ok(
+      cost <= 1451,
+      `esperava <= 1451 (o optimo local que o Or-opt em cadeia encontra), veio ${cost} de ${JSON.stringify(order)}`
+    );
+  });
+});
+
 describe("deadlines outrank a shorter route", () => {
   // Arriving late is the failure the driver actually pays for, so the
   // cost function is allowed to pick a LONGER route to avoid it. Built

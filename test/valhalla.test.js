@@ -9,6 +9,7 @@
 const { test, describe } = require("node:test");
 const assert = require("node:assert");
 const { startServer, postJson, getJson } = require("./helpers/harness");
+const { generateAccessCandidates } = require("../src/accessManager");
 
 const A = "46.9480,7.4470";
 const B = "46.9490,7.4480";
@@ -167,6 +168,51 @@ describe("road segment exclusion (Valhalla)", () => {
       assert.ok(
         secondPreview.body.unreachable.every((u) => u.blockedByNewBlock === false),
         "ja estava sem acesso so com o bloqueio ja guardado — a culpa nao e do bloqueio novo"
+      );
+    } finally { await s.stop(); }
+  });
+
+  // Regression: "Marcar ponto de acesso" (the manual-override button) used
+  // to only show up for a stop unreachableStops() called globally
+  // stranded — no finite route anywhere in the whole matrix. But a stop
+  // can have a perfectly fine route to some OTHER, far-away stop (so the
+  // matrix-level check clears it) while still having no way at all
+  // between it and the specific neighbour the optimizer actually placed
+  // it next to — the map still draws that leg as a broken (red) gap, but
+  // the button to fix it never appeared. Blocks B<->C directly AND every
+  // one of Access Manager's automatic-ring candidates around both, so
+  // that specific pairing genuinely has no rescue, while A<->B and A<->C
+  // stay wide open — B and C are each one hop from A, so neither is
+  // globally stranded.
+  test("offers the manual access-point button for a stop stranded only against its actual neighbour, not globally", async () => {
+    const ringB = generateAccessCandidates({ lat: 46.949, lng: 7.448 }, 60, 6);
+    const ringC = generateAccessCandidates({ lat: 46.950, lng: 7.449 }, 60, 6);
+    const blockedRoutePairs = [
+      [[46.949, 7.448], [46.950, 7.449]], // B <-> C direct
+      ...ringC.map((c) => [[46.949, 7.448], [c.lat, c.lng]]), // B -> C's ring
+      ...ringB.map((c) => [[46.950, 7.449], [c.lat, c.lng]]), // C -> B's ring
+    ];
+
+    const s = await startServer({
+      env: { VALHALLA_URL: "http://localhost:8002", APP_PASSWORD: "" },
+      config: { blockedRoutePairs },
+    });
+    try {
+      const preview = await postJson(s.baseUrl, "/api/road-exclusion/preview", {
+        addresses: [A, B, C],
+        routeGeometry: ROUTE_GEOMETRY,
+        previousRoute: { distanceMeters: 1000, durationSeconds: 100 },
+        pointA: POINT_A,
+        pointB: POINT_B,
+      });
+      assert.strictEqual(preview.status, 200);
+      assert.ok(
+        preview.body.newRoute.legs.some((l) => l.unreachable),
+        "a perna entre B e C devia vir marcada sem rota (pre-condicao do teste)"
+      );
+      assert.ok(
+        Array.isArray(preview.body.unreachable) && preview.body.unreachable.length > 0,
+        "devia oferecer o botao de ponto de acesso manual mesmo sem a paragem estar presa na matriz toda"
       );
     } finally { await s.stop(); }
   });
@@ -475,6 +521,168 @@ describe("Access Manager", () => {
       assert.ok(
         Number.isFinite(optimized.body.optimizedSeconds),
         "H devia ter sido resgatado pelo Access Manager, nao deixado a Infinity"
+      );
+    } finally { await s.stop(); }
+  });
+
+  // Regression test for the real-world symptom this bug produced: a
+  // stranded stop physically embedded in a cluster of other stops kept
+  // getting left wherever it sat in the ORIGINAL address list (e.g. "stop
+  // 105 of 150"), instead of next to the neighbours it actually belongs
+  // beside. Root cause: rescuing against only ONE nearest neighbour gives
+  // the stop a single finite edge — enough to tuck it onto the free end of
+  // a one-way route, but a round trip pins BOTH ends, so a stop stuck in
+  // the middle needs a real predecessor AND successor (two distinct finite
+  // edges) to be placed anywhere at all. With only one, every arrangement
+  // still crosses an Infinity edge, so 2-opt/or-opt can't tell good from
+  // bad and falls back to the input order untouched. Rescuing against
+  // several nearby stops (see rescueStrandedWithAccessManager's doc
+  // comment) fixes this by giving the optimizer real edges on both sides.
+  test("a stranded stop in a round trip is placed next to its real neighbours, not wherever it sat in the input list", async () => {
+    const S = "47.0100,7.5100"; // fixed first (roundTrip pins index 0)
+    const N1 = "47.0030,7.5031"; // X's real neighbours — a few metres away
+    const N2 = "47.0031,7.5030";
+    const X = "47.0030,7.5030"; // stranded, but physically IN the N1/N2 cluster
+    const F1 = "47.0050,7.5150"; // fillers, far from the N1/N2/X cluster
+    const F2 = "47.0060,7.5160"; // fixed last (roundTrip pins index n-1)
+
+    const s = await startServer({
+      env: { VALHALLA_URL: "http://localhost:8002", APP_PASSWORD: "" },
+      config: {
+        // X has no direct route to/from ANY other stop — genuinely
+        // stranded, exactly like the real case (a block cuts the street
+        // short of its door from every direction).
+        blockedRoutePairs: [
+          [[47.010, 7.510], [47.003, 7.503]], // S-X
+          [[47.003, 7.5031], [47.003, 7.503]], // N1-X
+          [[47.0031, 7.503], [47.003, 7.503]], // N2-X
+          [[47.005, 7.515], [47.003, 7.503]], // F1-X
+          [[47.006, 7.516], [47.003, 7.503]], // F2-X
+        ],
+      },
+    });
+    try {
+      // An active restriction near this cluster, just so /api/optimize
+      // takes the Valhalla-matrix branch instead of OSRM/Google.
+      const before = await postJson(s.baseUrl, "/api/route", { addresses: [N1, N2] });
+      const preview = await postJson(s.baseUrl, "/api/road-exclusion/preview", {
+        addresses: [N1, N2],
+        routeGeometry: { type: "LineString", coordinates: [[7.5031, 47.0030], [7.5030, 47.0031]] },
+        previousRoute: { distanceMeters: before.body.distanceMeters, durationSeconds: before.body.durationSeconds },
+        pointA: [7.5031, 47.0030],
+        pointB: [7.5030, 47.0031],
+      });
+      await postJson(s.baseUrl, "/api/road-exclusion/confirm", { draftRestriction: preview.body.draftRestriction });
+
+      // X is placed right after S in the INPUT list — nowhere near where
+      // it geographically belongs (between N1 and N2) — so a route that
+      // simply falls back to the given order is easy to tell apart from
+      // one that actually re-optimized it.
+      const addresses = [S, X, N1, N2, F1, F2];
+      const optimized = await postJson(s.baseUrl, "/api/optimize", {
+        addresses, mode: "driving", roundTrip: true,
+      });
+      assert.strictEqual(optimized.status, 200);
+      assert.ok(
+        Number.isFinite(optimized.body.optimizedSeconds),
+        "X devia ter sido resgatado com arestas reais dos dois lados, nao deixado a Infinity"
+      );
+
+      assert.deepStrictEqual(
+        [...optimized.body.order].sort((a, b) => a - b), [0, 1, 2, 3, 4, 5],
+        "as 6 paragens tem de continuar todas presentes, X incluido"
+      );
+    } finally { await s.stop(); }
+  });
+});
+
+// Feature tests for the manual access-point override (src/accessOverrides.js):
+// a point the driver picks by hand for a stop Access Manager's automatic
+// ring can't reach on its own — see findAccessibleRoute's doc comment in
+// src/valhalla.js.
+describe("manual access-point override", () => {
+  const ORIGIN_ADDR = A; // "46.9480,7.4470"
+  const TARGET_ADDR = B; // "46.9490,7.4480"
+  const ORIGIN_COORD = { lat: 46.948, lng: 7.447 };
+  const TARGET_COORD = { lat: 46.949, lng: 7.448 };
+
+  test("POST /api/access-overrides requires address and point", async () => {
+    const s = await startServer({ env: { APP_PASSWORD: "" } });
+    try {
+      const missingAddress = await postJson(s.baseUrl, "/api/access-overrides", { point: { lat: 1, lng: 2 } });
+      assert.strictEqual(missingAddress.status, 400);
+      const missingPoint = await postJson(s.baseUrl, "/api/access-overrides", { address: "Rua Teste 1" });
+      assert.strictEqual(missingPoint.status, 400);
+      const badPoint = await postJson(s.baseUrl, "/api/access-overrides", { address: "Rua Teste 1", point: { lat: "x", lng: 2 } });
+      assert.strictEqual(badPoint.status, 400);
+    } finally { await s.stop(); }
+  });
+
+  // The direct A-B leg AND every one of Access Manager's automatic ring
+  // candidates (same radius/count the server uses by default) are blocked
+  // on purpose, so a rescue can only succeed via the manual override this
+  // test saves — proving the override is actually what did it, not a
+  // coincidental automatic candidate.
+  test("a saved manual access point rescues a stop the automatic ring cannot reach", async () => {
+    const ring = generateAccessCandidates(TARGET_COORD, 60, 6);
+    const blockedRoutePairs = [
+      [[ORIGIN_COORD.lat, ORIGIN_COORD.lng], [TARGET_COORD.lat, TARGET_COORD.lng]],
+      ...ring.map((c) => [[ORIGIN_COORD.lat, ORIGIN_COORD.lng], [c.lat, c.lng]]),
+    ];
+
+    const s = await startServer({
+      env: { VALHALLA_URL: "http://localhost:8002", APP_PASSWORD: "" },
+      config: { blockedRoutePairs },
+    });
+    try {
+      // Sanity check: without an override, the automatic ring is fully
+      // blocked too, so the stop genuinely comes back unreachable — the
+      // rescue below can't be attributed to the ring working anyway.
+      const withoutOverride = await postJson(s.baseUrl, "/api/route", { addresses: [ORIGIN_ADDR, TARGET_ADDR] });
+      assert.strictEqual(withoutOverride.status, 200);
+      assert.ok(
+        withoutOverride.body.legs.some((l) => l.unreachable),
+        "sem override, nem o anel automatico deveria funcionar (pre-condicao do teste)"
+      );
+
+      const manualPoint = { lat: 46.9495, lng: 7.4488 }; // fora do anel automatico, sem bloqueio
+      const saved = await postJson(s.baseUrl, "/api/access-overrides", { address: TARGET_ADDR, point: manualPoint });
+      assert.strictEqual(saved.status, 200);
+      assert.strictEqual(saved.body.address, TARGET_ADDR);
+
+      const withOverride = await postJson(s.baseUrl, "/api/route", { addresses: [ORIGIN_ADDR, TARGET_ADDR] });
+      assert.strictEqual(withOverride.status, 200);
+      assert.ok(
+        withOverride.body.legs.every((l) => l.unreachable === false),
+        "devia ter sido resgatado pelo ponto de acesso manual guardado"
+      );
+      assert.ok(withOverride.body.distanceMeters > 0, "a rota resgatada tem de ter distancia real");
+    } finally { await s.stop(); }
+  });
+
+  // Negative case for the override itself: if the saved point stops having
+  // a route (map data changed, or it was never great), this must fall back
+  // to the automatic ring instead of giving up — a manual override is a
+  // preference, not a guarantee.
+  test("falls back to the automatic ring when the saved manual point no longer has a route", async () => {
+    const manualPoint = { lat: 46.9495, lng: 7.4488 };
+    const blockedRoutePairs = [
+      [[ORIGIN_COORD.lat, ORIGIN_COORD.lng], [TARGET_COORD.lat, TARGET_COORD.lng]],
+      [[ORIGIN_COORD.lat, ORIGIN_COORD.lng], [manualPoint.lat, manualPoint.lng]],
+    ];
+    const s = await startServer({
+      env: { VALHALLA_URL: "http://localhost:8002", APP_PASSWORD: "" },
+      config: { blockedRoutePairs },
+    });
+    try {
+      const saved = await postJson(s.baseUrl, "/api/access-overrides", { address: TARGET_ADDR, point: manualPoint });
+      assert.strictEqual(saved.status, 200);
+
+      const res = await postJson(s.baseUrl, "/api/route", { addresses: [ORIGIN_ADDR, TARGET_ADDR] });
+      assert.strictEqual(res.status, 200);
+      assert.ok(
+        res.body.legs.every((l) => l.unreachable === false),
+        "devia ter caido para o anel automatico quando o ponto manual falhou"
       );
     } finally { await s.stop(); }
   });

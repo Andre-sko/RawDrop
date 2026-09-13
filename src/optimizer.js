@@ -165,33 +165,48 @@ function optimizeOrder(durations, roundTrip, deadlineOptions) {
     return { order: best, cost: bestCost };
   }
 
-  // Or-opt: take one stop out and try it at every other position, keep
-  // whichever placement comes out cheaper, until nothing does. This is
-  // what 2-opt structurally cannot do — 2-opt only ever REVERSES a
-  // stretch of the route, it never moves a single stop somewhere else
-  // entirely. That matters most for exactly one case: a stop a road
-  // block made expensive to reach from its CURRENT neighbours, but cheap
-  // to reach from some other stop elsewhere in the round (a different
-  // approach street the block doesn't touch) — 2-opt alone tends to
-  // leave that stop stuck in a costly detour between whichever two
-  // neighbours nearest-neighbour originally gave it, because reversing a
-  // segment around it never relocates it anywhere near its actual best
-  // neighbour.
-  function orOpt(start) {
+  // Or-opt: take a chain of `segLen` CONSECUTIVE stops out and try it at
+  // every other position (order within the chain unchanged — reversing is
+  // 2-opt's job), keep whichever placement comes out cheaper, until
+  // nothing does. This is what 2-opt structurally cannot do — 2-opt only
+  // ever REVERSES a stretch of the route, it never moves a run of stops
+  // somewhere else entirely. That matters most for a stop a road block
+  // made expensive to reach from its CURRENT neighbours but cheap from
+  // some other stop elsewhere in the round — 2-opt alone tends to leave
+  // it stuck in a costly detour between whichever two neighbours
+  // nearest-neighbour originally gave it, because reversing a segment
+  // around it never relocates it anywhere near its actual best neighbour.
+  //
+  // segLen > 1 (a chain of 2 or 3, not just a single stop) exists for a
+  // narrower but real case single-stop relocation cannot reach: two
+  // stops that are genuinely close to each other geographically but were
+  // constructed as a pair elsewhere in the round. Moving EITHER one of
+  // them alone can come out costing more than it saves — it still has to
+  // pay for breaking its own two edges — even though the pair sitting
+  // together, moved as one unit, is cheaper than the round as it stands.
+  // A segLen=1 pass has no way to try that move; it only ever asks "is
+  // moving this ONE stop worth it", never "is moving these two together
+  // worth it". Without this, that pair can be left on opposite sides of a
+  // 100+ stop round even though the actual answer is right next to each
+  // other — the local search doing exactly what it's built to do, just
+  // never gets to ask the one question that would fix it.
+  function orOptChain(start, segLen) {
     let best = start.slice();
     let bestCost = routeCost(best);
     const lo = 1; // index 0 always fixed
-    const hi = fixLast ? best.length - 2 : best.length - 1; // movable stops
+    const hi = fixLast ? best.length - 2 : best.length - 1; // last movable index
+    const chainHi = hi - segLen + 1; // last index a whole chain of this length can start at
+    if (chainHi < lo) return { order: best, cost: bestCost }; // route too short for this chain length
     let improved = true;
     while (improved) {
       improved = false;
-      for (let i = lo; i <= hi; i++) {
-        const stop = best[i];
-        const withoutStop = best.slice(0, i).concat(best.slice(i + 1));
-        const insertHi = fixLast ? withoutStop.length - 1 : withoutStop.length;
+      for (let i = lo; i <= chainHi; i++) {
+        const chain = best.slice(i, i + segLen);
+        const withoutChain = best.slice(0, i).concat(best.slice(i + segLen));
+        const insertHi = fixLast ? withoutChain.length - 1 : withoutChain.length;
         for (let j = lo; j <= insertHi; j++) {
           if (j === i) continue; // same spot, no-op
-          const candidate = withoutStop.slice(0, j).concat([stop], withoutStop.slice(j));
+          const candidate = withoutChain.slice(0, j).concat(chain, withoutChain.slice(j));
           const candidateCost = routeCost(candidate);
           if (candidateCost < bestCost - 1e-6) {
             best = candidate;
@@ -204,10 +219,15 @@ function optimizeOrder(durations, roundTrip, deadlineOptions) {
     return { order: best, cost: bestCost };
   }
 
-  // Alternates the two passes until neither finds anything left to
-  // improve — 2-opt can open up a relocation Or-opt could not have found
-  // (and vice versa), so running one once each is not enough to reach a
-  // joint local optimum.
+  // Chain lengths Or-opt tries, longest last so a 3-stop relocation only
+  // ever fires once single- and pair-relocation are both exhausted.
+  const OR_OPT_CHAIN_LENGTHS = [1, 2, 3];
+
+  // Alternates 2-opt with every Or-opt chain length until nothing finds
+  // an improvement anymore — 2-opt can open up a relocation Or-opt could
+  // not have found (and vice versa), and a longer chain can open up a
+  // move a shorter one could not, so running each once is not enough to
+  // reach a joint local optimum.
   function localSearch(start) {
     let current = { order: start.slice(), cost: routeCost(start) };
     let improved = true;
@@ -215,8 +235,10 @@ function optimizeOrder(durations, roundTrip, deadlineOptions) {
       improved = false;
       const afterTwoOpt = twoOpt(current.order);
       if (afterTwoOpt.cost < current.cost - 1e-6) { current = afterTwoOpt; improved = true; }
-      const afterOrOpt = orOpt(current.order);
-      if (afterOrOpt.cost < current.cost - 1e-6) { current = afterOrOpt; improved = true; }
+      for (const segLen of OR_OPT_CHAIN_LENGTHS) {
+        const afterOrOpt = orOptChain(current.order, segLen);
+        if (afterOrOpt.cost < current.cost - 1e-6) { current = afterOrOpt; improved = true; }
+      }
     }
     return current;
   }
