@@ -11,8 +11,10 @@
 // is exactly what's needed for "preview, compare, cancel" to be safe.
 // =========================================================================
 
-const { VALHALLA_URL } = require("./config");
+const { VALHALLA_URL, ACCESS_CANDIDATE_RADIUS_M, ACCESS_CANDIDATE_COUNT } = require("./config");
 const { resolveToCoords, formatMetersText, formatSecondsText } = require("./routing");
+const { pointInsidePolygon } = require("./routeGeometry");
+const { generateAccessCandidates } = require("./accessManager");
 
 // Valhalla error_codes that specifically mean "no path exists between
 // these locations under the given constraints" (as opposed to a bad
@@ -224,6 +226,77 @@ async function valhallaRouteMixed(locations, restrictedFlags, { excludePolygons 
 // other leg still routes normally, and the one leg with no path comes
 // back as a straight-line placeholder flagged `unreachable: true`, so
 // the caller can show exactly where the gap is instead of a dead end.
+// Access Manager: when the direct point-to-point leg has no route at all
+// (the address's own geocoded point has no way in under the active
+// exclude_polygons — usually because a block cut the street a bit short
+// of the actual door), tries a ring of nearby points instead of giving
+// up outright. This is the common real case: the building is reachable
+// from a different side, a short walk/drive away, on a road the
+// restriction never touched.
+//
+// Every candidate is verified with REAL routing — never assumed from
+// distance alone (see accessManager.js's own doc comment) — for BOTH the
+// leg from `originLoc` to the candidate AND the short "last mile" from
+// the candidate to the actual address, since a candidate that's merely
+// standing somewhere routable isn't useful if there's no way from there
+// to the door either. A candidate whose own point already sits inside
+// one of the exclude polygons is skipped before spending a Valhalla call
+// on it — it's not an alternative to the thing that made the direct
+// point unreachable, it's the same problem.
+//
+// Returns the cheapest reachable candidate (by combined duration), or
+// null if none of them work — the caller falls back to reporting the
+// stop as unreachable, exactly as it did before this existed.
+async function findAccessibleRoute(originLoc, addressLoc, excludePolygons) {
+  const [addressCoord] = await resolveLocations([addressLoc]);
+  const candidates = generateAccessCandidates(addressCoord, ACCESS_CANDIDATE_RADIUS_M, ACCESS_CANDIDATE_COUNT)
+    .filter((c) => !(excludePolygons || []).some((poly) => pointInsidePolygon(c, poly)));
+
+  const attempts = await Promise.all(
+    candidates.map(async (candidate) => {
+      const candidateLoc = `${candidate.lat},${candidate.lng}`;
+      try {
+        const [toCandidate, lastMile] = await Promise.all([
+          valhallaRoute([originLoc, candidateLoc], { excludePolygons }),
+          valhallaRoute([candidateLoc, addressLoc], { excludePolygons }),
+        ]);
+        return { toCandidate, lastMile, cost: toCandidate.durationSeconds + lastMile.durationSeconds };
+      } catch (err) {
+        // A candidate genuinely having no route (ValhallaNoRouteError) is
+        // the expected, common case — silently "not viable". Anything
+        // else (a network hiccup, Valhalla briefly overloaded by this
+        // very burst of parallel requests, ...) must NOT be allowed to
+        // fail the whole rescue attempt: one flaky candidate out of six
+        // taking down the entire preview/route request — and, upstream,
+        // wiping the block's own line off the map when the request comes
+        // back 500 — would be far worse than just treating that one
+        // candidate as unusable and trying the rest.
+        if (!(err instanceof ValhallaNoRouteError)) {
+          console.warn(`Access Manager: candidato ${candidateLoc} falhou (${err.message}) — a tratar como nao viavel.`);
+        }
+        return null;
+      }
+    })
+  );
+
+  const viable = attempts.filter(Boolean);
+  const reachableCount = viable.length;
+  if (reachableCount === 0) {
+    console.warn(
+      `Access Manager: sem acesso alternativo para "${addressLoc}" (acesso direto BLOCKED, ` +
+      `${candidates.length} candidato(s) testado(s), 0 alcancavel).`
+    );
+    return null;
+  }
+  viable.sort((a, b) => a.cost - b.cost);
+  console.log(
+    `Access Manager: "${addressLoc}" sem acesso direto — usado acesso alternativo ` +
+    `(${reachableCount}/${candidates.length} candidato(s) alcancavel(is), ` +
+    `custo=${Math.round(viable[0].cost / 60)}min).`
+  );
+  return viable[0];
+}
+
 async function valhallaRouteAllowingGaps(locations, { excludePolygons } = {}) {
   const coords = await resolveLocations(locations);
   const legPromises = [];
@@ -231,8 +304,32 @@ async function valhallaRouteAllowingGaps(locations, { excludePolygons } = {}) {
     legPromises.push(
       valhallaRoute([locations[i], locations[i + 1]], { excludePolygons })
         .then((route) => ({ ...route.legs[0], unreachable: false }))
-        .catch((err) => {
+        .catch(async (err) => {
           if (!(err instanceof ValhallaNoRouteError)) throw err;
+
+          // A rescue attempt failing outright must not take the rest of
+          // this leg (or the whole map) down with it — fall through to
+          // the unreachable placeholder below exactly as if no candidate
+          // had worked.
+          let viaAccess = null;
+          try {
+            viaAccess = await findAccessibleRoute(locations[i], locations[i + 1], excludePolygons);
+          } catch (accessErr) {
+            console.warn(`Access Manager: tentativa de resgate falhou para "${locations[i + 1]}" (${accessErr.message}).`);
+          }
+          if (viaAccess) {
+            const combined = combineLegRoutes([viaAccess.toCandidate, viaAccess.lastMile]);
+            return {
+              geometry: combined.geometry,
+              distanceMeters: combined.distanceMeters,
+              distanceText: combined.distanceText,
+              durationSeconds: combined.durationSeconds,
+              durationText: combined.durationText,
+              unreachable: false,
+              viaAccessPoint: true,
+            };
+          }
+
           const a = coords[i];
           const b = coords[i + 1];
           return {
@@ -300,4 +397,5 @@ module.exports = {
   valhallaRouteMixed,
   valhallaRouteAllowingGaps,
   valhallaMatrix,
+  findAccessibleRoute,
 };

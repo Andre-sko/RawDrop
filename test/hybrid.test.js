@@ -109,7 +109,11 @@ describe("ROUTING_SOURCE", () => {
 
   test("osrm down: single leg falls back to Google instead of failing", async () => {
     const s = await startServer({
-      env: { ROUTING_SOURCE: "osrm", GEOCODING_SOURCE: "swisstopo" },
+      // VALHALLA_URL explicitly cleared: this test is specifically about
+      // the OSRM->Google leg of the fallback chain, not the new
+      // OSRM->Valhalla->Google one below — with Valhalla configured it
+      // would (correctly) answer first, which is a different test.
+      env: { ROUTING_SOURCE: "osrm", GEOCODING_SOURCE: "swisstopo", VALHALLA_URL: "" },
       config: { osrmDown: true, defaultSeconds: 777 },
     });
     try {
@@ -117,6 +121,44 @@ describe("ROUTING_SOURCE", () => {
         origin: "Teststrasse 1 Bern", destination: "Teststrasse 2 Bern", mode: "driving",
       });
       assert.strictEqual(res.status, 200, "devia recuperar via Google");
+      assert.strictEqual(res.body.durationSeconds, 777, "devia vir da Google");
+    } finally { await s.stop(); }
+  });
+
+  // Regression/feature: OSRM_URL_WALKING commonly isn't set up at all (it
+  // needs a whole SEPARATE osrm-routed instance built with the "foot"
+  // profile) — historically that meant a walking leg (e.g. "Endereço
+  // interdito" with a parking point) fell straight to Google, which is no
+  // safety net at all for anyone who never configured a Google API key.
+  // Valhalla already runs for the map/"Bloquear via" feature and scores
+  // pedestrian legs natively, so it's tried before Google, not after.
+  test("osrm down: single leg falls back to Valhalla before Google", async () => {
+    const s = await startServer({
+      env: { ROUTING_SOURCE: "osrm", GEOCODING_SOURCE: "swisstopo", VALHALLA_URL: "http://localhost:8002", APP_PASSWORD: "" },
+      config: { osrmDown: true, defaultSeconds: 777 },
+    });
+    try {
+      const res = await postJson(s.baseUrl, "/api/distance", {
+        origin: "46.9480,7.4470", destination: "46.9490,7.4480", mode: "walking",
+      });
+      assert.strictEqual(res.status, 200, "devia recuperar via Valhalla");
+      assert.ok(res.body.durationSeconds > 0 && res.body.durationSeconds !== 777, "devia vir do Valhalla, nao da Google (777s)");
+      const calls = s.calls();
+      assert.ok(calls.includes("valhalla"), "devia ter tentado o Valhalla");
+      assert.ok(!calls.includes("google-distance"), "nao devia ter precisado de cair para a Google");
+    } finally { await s.stop(); }
+  });
+
+  test("osrm and valhalla both down: still falls back to Google", async () => {
+    const s = await startServer({
+      env: { ROUTING_SOURCE: "osrm", GEOCODING_SOURCE: "swisstopo", VALHALLA_URL: "", APP_PASSWORD: "" },
+      config: { osrmDown: true, defaultSeconds: 777 },
+    });
+    try {
+      const res = await postJson(s.baseUrl, "/api/distance", {
+        origin: "46.9480,7.4470", destination: "46.9490,7.4480", mode: "walking",
+      });
+      assert.strictEqual(res.status, 200, "devia recuperar via Google, ultimo recurso");
       assert.strictEqual(res.body.durationSeconds, 777, "devia vir da Google");
     } finally { await s.stop(); }
   });

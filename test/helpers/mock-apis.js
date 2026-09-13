@@ -96,21 +96,50 @@ global.fetch = async (url, ...rest) => {
   if (raw.endsWith("/route") || raw.endsWith("/sources_to_targets")) {
     record("valhalla");
     if (cfg.valhallaDown) throw new Error("Valhalla indisponivel (teste)");
+    // Simulates ONE transient failure (network hiccup, momentary overload)
+    // partway through a burst of calls — e.g. Access Manager firing many
+    // candidate requests at once — without making every Valhalla call
+    // fail like cfg.valhallaDown does. 1-indexed across every /route and
+    // /sources_to_targets call this mock instance sees.
+    if (typeof cfg.valhallaFlakyOnCall === "number") {
+      global.__valhallaCallCount = (global.__valhallaCallCount || 0) + 1;
+      if (global.__valhallaCallCount === cfg.valhallaFlakyOnCall) {
+        throw new Error("Falha de rede transitoria (teste)");
+      }
+    }
 
     const opts = rest[0] || {};
     const body = opts.body ? JSON.parse(opts.body) : {};
     const excluded = Array.isArray(body.exclude_polygons) && body.exclude_polygons.length > 0;
 
+    // Shared pair-matching, by ACTUAL coordinates rather than by index
+    // position — an Access Manager candidate probe is always a fresh
+    // 2-point request, so it always sits at "index 0,1" too; matching by
+    // position would make every candidate look like the one pair every
+    // test excludes, regardless of which real coordinates it carries.
+    const pairKey = (locs) => locs.map((l) => `${l.lat},${l.lon}`).sort().join("|");
+    const isExactPairBlocked = (a, b) =>
+      Array.isArray(cfg.blockedRoutePairs) &&
+      cfg.blockedRoutePairs.some((pair) => pairKey(pair.map(([lat, lon]) => ({ lat, lon }))) === pairKey([a, b]));
+    // The pair every existing test excludes: A ("46.9480,7.4470") and B
+    // ("46.9490,7.4480") from test/valhalla.test.js — kept as a literal
+    // coordinate match (not a position check) so it only ever fires for
+    // an actual A<->B request, never incidentally for an unrelated
+    // 2-point probe that just happens to land at positions 0 and 1.
+    const STANDARD_EXCLUDED_PAIR_KEY = pairKey([{ lat: 46.948, lon: 7.447 }, { lat: 46.949, lon: 7.448 }]);
+    const isStandardPairBlocked = (a, b) => excluded && pairKey([a, b]) === STANDARD_EXCLUDED_PAIR_KEY;
+
     if (raw.endsWith("/sources_to_targets")) {
-      const n = (body.sources || []).length;
-      // Pair (0,1)/(1,0) is the one every test "excludes" — everything
-      // else stays cheap, so re-optimizing has a real alternative to
-      // find UNLESS cfg.valhallaNoRoute makes every pair unreachable
-      // once excluded (used for the "no alternative exists" test).
-      const sourcesToTargets = Array.from({ length: n }, (_, i) =>
-        Array.from({ length: n }, (_, j) => {
+      const sources = body.sources || [];
+      const targets = body.targets || [];
+      // A-B is the one every test "excludes" — everything else stays
+      // cheap, so re-optimizing has a real alternative to find UNLESS
+      // cfg.valhallaNoRoute makes every pair unreachable once excluded
+      // (used for the "no alternative exists" test).
+      const sourcesToTargets = sources.map((s, i) =>
+        targets.map((t, j) => {
           if (i === j) return { from_index: i, to_index: j, time: 0, distance: 0 };
-          const blocked = excluded && (cfg.valhallaNoRoute || ((i === 0 && j === 1) || (i === 1 && j === 0)));
+          const blocked = isExactPairBlocked(s, t) || isStandardPairBlocked(s, t) || (excluded && cfg.valhallaNoRoute);
           return { from_index: i, to_index: j, time: blocked ? null : 300, distance: blocked ? null : 3 };
         }));
       return { ok: true, json: async () => ({ sources_to_targets: sourcesToTargets }) };
@@ -118,6 +147,19 @@ global.fetch = async (url, ...rest) => {
 
     // /route
     if (excluded && cfg.valhallaNoRoute) {
+      return {
+        ok: false,
+        status: 400,
+        json: async () => ({ error_code: 442, error: "No path could be found for input" }),
+      };
+    }
+    // cfg.blockedRoutePairs: exact "lat,lon" endpoint pairs (either order)
+    // that have no route regardless of exclude_polygons — lets a test set
+    // up "A->B direct has no route, but A->(some other point) does" for
+    // the Access Manager, which plain valhallaNoRoute (blocks EVERY
+    // excluded pair alike) can't express.
+    const reqLocations = body.locations || [];
+    if (reqLocations.length === 2 && isExactPairBlocked(reqLocations[0], reqLocations[1])) {
       return {
         ok: false,
         status: 400,

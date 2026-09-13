@@ -335,3 +335,147 @@ describe("road segment exclusion (Valhalla)", () => {
     } finally { await s.stop(); }
   });
 });
+
+describe("Access Manager", () => {
+  // Regression/feature test: a stop whose own point has literally no
+  // route (simulating a block that cut the street a bit short of its
+  // door) must still be reached, from a nearby alternative point, rather
+  // than immediately reported as unreachable — see findAccessibleRoute's
+  // doc comment in src/valhalla.js. blockedRoutePairs (unlike
+  // valhallaNoRoute, which blocks every excluded pair alike) blocks ONLY
+  // the exact A-B pair, leaving every candidate point free to route
+  // normally, which is what actually exercises the rescue path instead
+  // of a coincidental mock quirk.
+  test("reaches a stop via a nearby access point when its own direct route has none", async () => {
+    const s = await startServer({
+      env: { VALHALLA_URL: "http://localhost:8002", APP_PASSWORD: "" },
+      config: { blockedRoutePairs: [[[46.948, 7.447], [46.949, 7.448]]] },
+    });
+    try {
+      const res = await postJson(s.baseUrl, "/api/route", { addresses: [A, B] });
+      assert.strictEqual(res.status, 200);
+      assert.ok(
+        res.body.legs.every((l) => l.unreachable === false),
+        "devia ter sido resgatado por um acesso alternativo, nao marcado sem rota"
+      );
+      assert.ok(res.body.distanceMeters > 0, "a rota resgatada tem de ter distancia real, nao o placeholder a zero");
+    } finally { await s.stop(); }
+  });
+
+  // The negative case: when NO candidate around the stop has a route
+  // either (a genuinely sealed-off address, not just an unlucky exact
+  // pair), it must still fall back to reporting it as unreachable rather
+  // than hanging or throwing — Access Manager is a rescue attempt, not a
+  // guarantee.
+  test("still reports unreachable when no access candidate works either", async () => {
+    const s = await startServer({
+      env: { VALHALLA_URL: "http://localhost:8002", APP_PASSWORD: "" },
+      config: { valhallaNoRoute: true },
+    });
+    try {
+      const preview = await postJson(s.baseUrl, "/api/road-exclusion/preview", {
+        addresses: [A, B],
+        routeGeometry: { type: "LineString", coordinates: [[7.4470, 46.9480], [7.4480, 46.9490]] },
+        previousRoute: { distanceMeters: 1000, durationSeconds: 100 },
+        pointA: POINT_A,
+        pointB: POINT_B,
+      });
+      assert.strictEqual(preview.status, 200);
+      assert.ok(Array.isArray(preview.body.unreachable) && preview.body.unreachable.length > 0);
+      assert.ok(preview.body.newRoute.legs.some((l) => l.unreachable === true));
+    } finally { await s.stop(); }
+  });
+
+  // Regression: Access Manager fires up to ACCESS_CANDIDATE_COUNT*2
+  // Valhalla calls in parallel when the direct point has no route. One
+  // of them hitting a transient failure (not "no route" — a genuine
+  // network/server hiccup) used to reject the whole Promise.all, which
+  // crashed the entire /api/route request with a 500 — and upstream,
+  // the client treats a failed request as reason to wipe the block's own
+  // line off the map. One flaky candidate must not take the other five
+  // (or the map) down with it.
+  test("one candidate hitting a transient error does not fail the whole request", async () => {
+    const s = await startServer({
+      env: { VALHALLA_URL: "http://localhost:8002", APP_PASSWORD: "" },
+      config: {
+        blockedRoutePairs: [[[46.948, 7.447], [46.949, 7.448]]],
+        // Calls 1-2 are the direct A-B attempts (both correctly blocked);
+        // call 5 lands inside the candidate probing — one candidate's
+        // "to candidate" or "last mile" leg — and blows up with a plain
+        // Error instead of a clean ValhallaNoRouteError.
+        valhallaFlakyOnCall: 5,
+      },
+    });
+    try {
+      const res = await postJson(s.baseUrl, "/api/route", { addresses: [A, B] });
+      assert.strictEqual(res.status, 200, "um candidato instavel nao pode derrubar o pedido inteiro");
+      assert.ok(
+        res.body.legs.every((l) => l.unreachable === false),
+        "os outros candidatos ainda deviam ter resgatado a paragem"
+      );
+    } finally { await s.stop(); }
+  });
+
+  // Regression/feature test: /api/optimize's Valhalla-matrix branch used
+  // to hand a stop with NO way in or out anywhere in the matrix (not just
+  // on one order) straight to the optimizer as Infinity — this checks it
+  // gets the same Access Manager rescue the map/preview side already has,
+  // patched into the matrix BEFORE the optimizer ever sees it, so the
+  // final order and its total cost are both real numbers.
+  test("/api/optimize rescues a stop with no way in/out anywhere in the matrix", async () => {
+    // A separate cluster, deliberately NOT reusing A/B's literal
+    // coordinates: the mock's "pair every OTHER test excludes" rule
+    // matches by exact coordinates now (see mock-apis.js), so touching
+    // A-B here would add a SECOND, unrelated Infinity edge on top of the
+    // one this test is actually about, and conflate the two.
+    const E = "47.0000,7.5000";
+    const F = "47.0010,7.5010";
+    const G = "47.0020,7.5020";
+    const H = "47.0030,7.5030"; // the one with no way in/out anywhere
+    const geometry = {
+      type: "LineString",
+      coordinates: [[7.5000, 47.0000], [7.5010, 47.0010], [7.5020, 47.0020]],
+    };
+    const pointE = [7.5000, 47.0000];
+    const pointF = [7.5010, 47.0010];
+
+    const s = await startServer({
+      env: { VALHALLA_URL: "http://localhost:8002", APP_PASSWORD: "" },
+      config: {
+        // H has no direct route to/from ANY of E, F or G — genuinely
+        // stranded, not just expensive on one particular order.
+        blockedRoutePairs: [
+          [[47.000, 7.500], [47.003, 7.503]], // E-H
+          [[47.001, 7.501], [47.003, 7.503]], // F-H
+          [[47.002, 7.502], [47.003, 7.503]], // G-H
+        ],
+      },
+    });
+    try {
+      // An active restriction near these addresses, just so /api/optimize
+      // takes the Valhalla-matrix branch instead of OSRM/Google.
+      const before = await postJson(s.baseUrl, "/api/route", { addresses: [E, F, G] });
+      const preview = await postJson(s.baseUrl, "/api/road-exclusion/preview", {
+        addresses: [E, F, G],
+        routeGeometry: geometry,
+        previousRoute: { distanceMeters: before.body.distanceMeters, durationSeconds: before.body.durationSeconds },
+        pointA: pointE,
+        pointB: pointF,
+      });
+      await postJson(s.baseUrl, "/api/road-exclusion/confirm", { draftRestriction: preview.body.draftRestriction });
+
+      const optimized = await postJson(s.baseUrl, "/api/optimize", {
+        addresses: [E, F, G, H], mode: "driving",
+      });
+      assert.strictEqual(optimized.status, 200);
+      assert.deepStrictEqual(
+        [...optimized.body.order].sort((a, b) => a - b), [0, 1, 2, 3],
+        "as 4 paragens tem de continuar todas presentes, H incluido"
+      );
+      assert.ok(
+        Number.isFinite(optimized.body.optimizedSeconds),
+        "H devia ter sido resgatado pelo Access Manager, nao deixado a Infinity"
+      );
+    } finally { await s.stop(); }
+  });
+});

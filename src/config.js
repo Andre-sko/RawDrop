@@ -73,6 +73,16 @@ const VALHALLA_URL = (process.env.VALHALLA_URL || "").trim().replace(/\/+$/, "")
 const VALHALLA_MAX_EXCLUDE_CIRCUMFERENCE = Number(process.env.VALHALLA_MAX_EXCLUDE_CIRCUMFERENCE || 10000);
 const MAX_BLOCK_SEGMENT_METERS = Number(process.env.MAX_BLOCK_SEGMENT_METERS || 1000);
 
+// Access Manager (src/accessManager.js): when a stop's own geocoded
+// point has no route under the active exclude_polygons, how wide a ring
+// of alternative points to try around it, and how many. Kept small on
+// purpose — this is meant to catch "the door is on the blocked side, but
+// the building is reachable from the other side, a short walk/drive
+// away", not to go looking for a route several streets over (that's what
+// moving/shortening the block itself is for).
+const ACCESS_CANDIDATE_RADIUS_M = Number(process.env.ACCESS_CANDIDATE_RADIUS_M || 60);
+const ACCESS_CANDIDATE_COUNT = Number(process.env.ACCESS_CANDIDATE_COUNT || 6);
+
 const VALID_GEOCODING_SOURCES = ["auto", "swisstopo", "google"];
 
 const GEOCODING_SOURCE = (() => {
@@ -126,6 +136,8 @@ module.exports = {
   VALHALLA_URL,
   VALHALLA_MAX_EXCLUDE_CIRCUMFERENCE,
   MAX_BLOCK_SEGMENT_METERS,
+  ACCESS_CANDIDATE_RADIUS_M,
+  ACCESS_CANDIDATE_COUNT,
   DATA_DIR,
   ALIASES_FILE,
   BLOCKED_FILE,

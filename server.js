@@ -35,10 +35,10 @@ const {
 } = require("./src/api-log");
 const { geocodeAddressBest } = require("./src/geocoding");
 const { osrmSingleLeg, buildMixedDurationMatrix, overlayWalkingMatrix, resolveToCoords } = require("./src/routing");
-const { valhallaRoute, valhallaRouteMixed, valhallaRouteAllowingGaps, valhallaMatrix, ValhallaNoRouteError } = require("./src/valhalla");
+const { valhallaRoute, valhallaRouteMixed, valhallaRouteAllowingGaps, valhallaMatrix, findAccessibleRoute, ValhallaNoRouteError } = require("./src/valhalla");
 const {
   snapPointToRoute, sliceRouteBetween, bufferSegment, trimSegmentToLength,
-  polygonPerimeterMeters, lineLengthMeters, pointInsidePolygon,
+  polygonPerimeterMeters, lineLengthMeters, pointInsidePolygon, haversineMeters,
 } = require("./src/routeGeometry");
 const {
   createRestriction, listActiveRestrictions, listAllRestrictions,
@@ -904,6 +904,7 @@ app.post("/api/distance", async (req, res) => {
   // already computed by Google would be re-requested (and re-paid for)
   // on every call while OSRM stays unavailable.
   const osrmKey = distanceCacheKey(origin, destination, travelMode, "osrm");
+  const valhallaKey = distanceCacheKey(origin, destination, travelMode, "valhalla");
   const googleKey = distanceCacheKey(origin, destination, travelMode, "google");
 
   if (ROUTING_SOURCE === "osrm") {
@@ -918,11 +919,41 @@ app.post("/api/distance", async (req, res) => {
         return res.json(viaOsrm);
       }
       // null means either an address couldn't be geocoded, or this is a
-      // walking leg with no OSRM_URL_WALKING set — fall through to Google.
+      // walking leg with no OSRM_URL_WALKING set — try Valhalla next.
     } catch (err) {
-      console.error("OSRM falhou, a usar a Google para este troco:", err.message);
+      console.error("OSRM falhou, a tentar o Valhalla para este troco:", err.message);
       // Deliberately falls through rather than failing the whole route:
       // a routing engine that's down shouldn't stop you working.
+    }
+
+    // Valhalla already runs for the map/"Bloquear via" feature and scores
+    // pedestrian legs natively (costing: "pedestrian") — reusing it here
+    // means a walking leg (e.g. an "Endereço interdito" with a parking
+    // point) still gets a real distance without standing up a WHOLE
+    // second OSRM instance just for walking, and it works even when
+    // Google isn't configured at all (this app's safety net after OSRM
+    // used to be Google alone, which is no safety net if that key was
+    // never set up).
+    if (VALHALLA_URL) {
+      const cachedValhalla = getFromCache(distanceCache, valhallaKey, DISTANCE_CACHE_TTL_MS);
+      if (cachedValhalla !== undefined) return res.json(cachedValhalla);
+
+      try {
+        const viaValhalla = await valhallaRoute([origin, destination], {
+          costing: travelMode === "walking" ? "pedestrian" : "auto",
+        });
+        const result = {
+          distanceMeters: viaValhalla.distanceMeters,
+          distanceText: viaValhalla.distanceText,
+          durationSeconds: viaValhalla.durationSeconds,
+          durationText: viaValhalla.durationText,
+        };
+        distanceCache[valhallaKey] = { value: result, cachedAt: Date.now() };
+        saveCache(DISTANCE_CACHE_FILE, distanceCache);
+        return res.json(result);
+      } catch (err) {
+        console.error("Valhalla tambem falhou, a usar a Google para este troco:", err.message);
+      }
     }
   }
 
@@ -1208,6 +1239,52 @@ app.post("/api/extract-addresses", upload.single("media"), async (req, res) => {
   }
 });
 
+// Access Manager for a duration matrix (used by /api/optimize): a stop
+// that has NO finite way in AND/OR out anywhere in the matrix — not just
+// on the order the optimizer happened to try — gets one real rescue
+// attempt via a nearby alternative access point (see findAccessibleRoute's
+// doc comment in src/valhalla.js) before the optimizer ever sees it as
+// impossible. Patches the matrix in place so the ordering decision
+// itself accounts for the (slightly longer, but real) way in/out,
+// instead of only fixing this up cosmetically after an order is chosen.
+//
+// Straight-line distance picks WHICH other stop to route the rescue
+// attempt from (a cheap search anchor) — never whether the rescue
+// succeeds or what it costs, which is decided exclusively by
+// findAccessibleRoute's real routing. Both directions get the same
+// patched cost (avoids doubling the Valhalla calls); it's an
+// approximation, but a real routed number, never a straight-line one.
+async function rescueStrandedWithAccessManager(durations, addresses, points, excludePolygons, roundTrip) {
+  const stranded = unreachableStops(durations, { lastIsFinal: !roundTrip });
+  if (stranded.length === 0) return durations;
+
+  await Promise.all(stranded.map(async (idx) => {
+    let nearestIdx = -1;
+    let nearestDist = Infinity;
+    for (let j = 0; j < addresses.length; j++) {
+      if (j === idx || !points[j]) continue;
+      const d = haversineMeters(points[idx], points[j]);
+      if (d < nearestDist) { nearestDist = d; nearestIdx = j; }
+    }
+    if (nearestIdx === -1) return;
+    try {
+      const viaAccess = await findAccessibleRoute(addresses[nearestIdx], addresses[idx], excludePolygons);
+      if (viaAccess) {
+        const cost = viaAccess.toCandidate.durationSeconds + viaAccess.lastMile.durationSeconds;
+        durations[nearestIdx][idx] = cost;
+        durations[idx][nearestIdx] = cost;
+      }
+    } catch (err) {
+      // A rescue attempt failing outright must not take the whole
+      // optimize request down with it — that stop just stays Infinity,
+      // exactly as if Access Manager didn't exist.
+      console.warn(`Access Manager: tentativa de resgate falhou para "${addresses[idx]}" (${err.message}).`);
+    }
+  }));
+
+  return durations;
+}
+
 // POST /api/optimize
 app.post("/api/optimize", async (req, res) => {
   const { addresses, mode, roundTrip, restricted, deadlines, startMinutes, stopMinutes } = req.body || {};
@@ -1257,6 +1334,12 @@ app.post("/api/optimize", async (req, res) => {
         // most: the van can't reach the stop by road (correctly excluded),
         // but on foot it's perfectly reachable.
         durations = await overlayWalkingMatrix(durations, addresses, restrictedFlags);
+        // Same reasoning as the map/preview side (see server.js's
+        // /api/road-exclusion/preview comment): a stop this exclusion
+        // leaves with no way in/out at all gets one real rescue attempt
+        // via Access Manager before the optimizer has to treat it as
+        // flat-out impossible.
+        durations = await rescueStrandedWithAccessManager(durations, addresses, points, polygons, roundTrip);
       } else {
         durations = await buildMixedDurationMatrix(addresses, mode || "driving", restrictedFlags);
       }
@@ -1514,33 +1597,65 @@ app.post("/api/road-exclusion/preview", async (req, res) => {
     const isImpossible = order.some((idx, i) => i > 0 && matrix[order[i - 1]][idx] === Infinity);
     let unreachable = null;
     if (isImpossible) {
-      const stranded = unreachableStops(matrix, { lastIsFinal: !roundTrip });
-      // "Inside the new block's own polygon" is NOT the same question as
-      // "did the new block cause this" — a block almost never covers a
-      // doorstep exactly, it cuts the street a bit short of it, which
-      // pointInsidePolygon reports as false. That used to make this
-      // blame "the blocks you already saved" whenever the stop wasn't
-      // LITERALLY inside the new polygon, even with zero other
-      // restrictions active — sending the driver hunting for a
-      // nonexistent culprit instead of the block they just drew. So
-      // check it directly: would this stop still be stranded with the
-      // new block taken back OUT, leaving only what was already saved?
-      // Still stranded → the saved ones are genuinely responsible.
-      // Reachable again → this new block is the whole story, regardless
-      // of whether it happens to sit on the doorstep or just the one
-      // road leading to it.
-      const matrixWithoutNewBlock = activePolygons.length > 0
-        ? await valhallaMatrix(addresses, { excludePolygons: activePolygons })
-        : null;
-      const strandedWithoutNewBlock = matrixWithoutNewBlock
-        ? new Set(unreachableStops(matrixWithoutNewBlock, { lastIsFinal: !roundTrip }))
-        : new Set();
-      unreachable = stranded.map((idx) => ({
-        index: idx,
-        address: addresses[idx],
-        insideNewBlock: pointInsidePolygon(points[idx], excludePolygon),
-        blockedByNewBlock: !strandedWithoutNewBlock.has(idx),
+      let stranded = unreachableStops(matrix, { lastIsFinal: !roundTrip });
+
+      // Access Manager: before reporting a stop as sealed off, give it
+      // one real chance — a nearby alternative access point the block
+      // never touched (see findAccessibleRoute's doc comment in
+      // src/valhalla.js). Uses whichever neighbour the computed order
+      // actually drives from/to, which is deliberate: valhallaRouteAllowingGaps
+      // below checks that EXACT same pair when it draws newRoute, so a
+      // stop rescued here is guaranteed to also draw as a normal
+      // (non-red) leg — the warning and the map never disagree.
+      const rescued = new Set();
+      await Promise.all(stranded.map(async (idx) => {
+        const pos = order.indexOf(idx);
+        const neighborIdx = pos > 0 ? order[pos - 1] : (pos + 1 < order.length ? order[pos + 1] : null);
+        if (neighborIdx == null) return;
+        // A rescue attempt failing outright (geocoding hiccup, Valhalla
+        // briefly unreachable, ...) must not take down the whole preview
+        // — that would turn "no alternative found" into "the block's own
+        // line vanishes off the map", which is strictly worse than just
+        // falling through to reporting this one stop as unreachable.
+        try {
+          const viaAccess = pos > 0
+            ? await findAccessibleRoute(addresses[neighborIdx], addresses[idx], allExcludePolygons)
+            : await findAccessibleRoute(addresses[idx], addresses[neighborIdx], allExcludePolygons);
+          if (viaAccess) rescued.add(idx);
+        } catch (err) {
+          console.warn(`Access Manager: tentativa de resgate falhou para "${addresses[idx]}" (${err.message}).`);
+        }
       }));
+      if (rescued.size > 0) stranded = stranded.filter((idx) => !rescued.has(idx));
+
+      if (stranded.length > 0) {
+        // "Inside the new block's own polygon" is NOT the same question as
+        // "did the new block cause this" — a block almost never covers a
+        // doorstep exactly, it cuts the street a bit short of it, which
+        // pointInsidePolygon reports as false. That used to make this
+        // blame "the blocks you already saved" whenever the stop wasn't
+        // LITERALLY inside the new polygon, even with zero other
+        // restrictions active — sending the driver hunting for a
+        // nonexistent culprit instead of the block they just drew. So
+        // check it directly: would this stop still be stranded with the
+        // new block taken back OUT, leaving only what was already saved?
+        // Still stranded → the saved ones are genuinely responsible.
+        // Reachable again → this new block is the whole story, regardless
+        // of whether it happens to sit on the doorstep or just the one
+        // road leading to it.
+        const matrixWithoutNewBlock = activePolygons.length > 0
+          ? await valhallaMatrix(addresses, { excludePolygons: activePolygons })
+          : null;
+        const strandedWithoutNewBlock = matrixWithoutNewBlock
+          ? new Set(unreachableStops(matrixWithoutNewBlock, { lastIsFinal: !roundTrip }))
+          : new Set();
+        unreachable = stranded.map((idx) => ({
+          index: idx,
+          address: addresses[idx],
+          insideNewBlock: pointInsidePolygon(points[idx], excludePolygon),
+          blockedByNewBlock: !strandedWithoutNewBlock.has(idx),
+        }));
+      }
     }
 
     const reorderedAddresses = order.map((i) => addresses[i]);
@@ -1548,7 +1663,12 @@ app.post("/api/road-exclusion/preview", async (req, res) => {
     // The whole-trip call throws if ANY leg has no route at all, which
     // would hide a perfectly good route behind the one sealed-off stop —
     // route leg by leg instead so only that stretch comes back flagged.
-    const newRoute = unreachable
+    // Keyed on isImpossible, not on the (possibly now-empty) `unreachable`
+    // list: a stop the Access Manager just rescued above still has no
+    // DIRECT route between its neighbours, so the plain whole-trip call
+    // would throw on it all the same — it needs the same leg-by-leg,
+    // access-aware path to actually draw.
+    const newRoute = isImpossible
       ? await valhallaRouteAllowingGaps(reorderedAddresses, { excludePolygons: allExcludePolygons })
       : await valhallaRoute(reorderedAddresses, { excludePolygons: allExcludePolygons });
 
