@@ -525,6 +525,59 @@ describe("Access Manager", () => {
     } finally { await s.stop(); }
   });
 
+  // Regression: a globally-stranded stop Access Manager successfully
+  // rescues via a nearby-neighbour candidate (patching the MATRIX to a
+  // finite cost for that pair, see rescueStrandedWithAccessManager) used
+  // to still blow up /api/road-exclusion/preview's actual route DRAWING
+  // step. The optimizer, seeing that patched matrix, happily places the
+  // rescued stop right next to the neighbour it was rescued through — but
+  // the plain whole-trip Valhalla /route call that draws the map for the
+  // map screen has no idea an access point was ever involved, so it
+  // retries the raw, still-blocked address pair and Valhalla fails the
+  // ENTIRE request with its own "No path could be found for input" —
+  // surfaced to the driver as a dead-end error, with no chance to
+  // hand-pick an access point (that UI only ever shows up for a preview
+  // that actually finished, carrying an `unreachable` list).
+  test("a stop rescued in the matrix does not still blow up the whole-trip route draw", async () => {
+    const E = "47.1000,7.6000";
+    const F = "47.1010,7.6010";
+    const G = "47.1020,7.6020";
+    const H = "47.1030,7.6030"; // no direct route to/from E, F or G — rescuable only via its own access-candidate ring
+    const geometry = {
+      type: "LineString",
+      coordinates: [[7.6000, 47.1000], [7.6010, 47.1010], [7.6020, 47.1020]],
+    };
+    const s = await startServer({
+      env: { VALHALLA_URL: "http://localhost:8002", APP_PASSWORD: "" },
+      config: {
+        blockedRoutePairs: [
+          [[47.100, 7.600], [47.103, 7.603]], // E-H
+          [[47.101, 7.601], [47.103, 7.603]], // F-H
+          [[47.102, 7.602], [47.103, 7.603]], // G-H
+        ],
+      },
+    });
+    try {
+      const before = await postJson(s.baseUrl, "/api/route", { addresses: [E, F, G] });
+      const preview = await postJson(s.baseUrl, "/api/road-exclusion/preview", {
+        addresses: [E, F, G, H],
+        routeGeometry: geometry,
+        previousRoute: { distanceMeters: before.body.distanceMeters, durationSeconds: before.body.durationSeconds },
+        pointA: [7.6000, 47.1000],
+        pointB: [7.6010, 47.1010],
+      });
+      assert.strictEqual(
+        preview.status, 200,
+        "uma paragem ja resgatada na matriz nao pode fazer a pre-visualizacao inteira falhar com o erro em bruto do Valhalla"
+      );
+      assert.ok(preview.body.newRoute && preview.body.newRoute.distanceMeters > 0);
+      assert.deepStrictEqual(
+        [...preview.body.order].sort((a, b) => a - b), [0, 1, 2, 3],
+        "as 4 paragens tem de continuar todas presentes, H incluido"
+      );
+    } finally { await s.stop(); }
+  });
+
   // Regression test for the real-world symptom this bug produced: a
   // stranded stop physically embedded in a cluster of other stops kept
   // getting left wherever it sat in the ORIGINAL address list (e.g. "stop
@@ -684,6 +737,44 @@ describe("manual access-point override", () => {
         res.body.legs.every((l) => l.unreachable === false),
         "devia ter caido para o anel automatico quando o ponto manual falhou"
       );
+    } finally { await s.stop(); }
+  });
+});
+
+// Regression: on a ROUTING_SOURCE=osrm setup, a walk-only stop's distance
+// used to have exactly one fallback left once OSRM's walking instance was
+// unreachable — Google — and if THAT also didn't work (no key, API not
+// enabled, billing not set up: all common on a setup where OSRM is doing
+// the real routing and Google was never meant to be used), /api/optimize
+// failed outright for the whole route, every single time any stop was
+// walk-only. Valhalla — already configured for the map feature, and
+// already the fallback /api/distance's single-leg path uses — is now
+// tried first for the WHOLE walking matrix too (see
+// buildWalkingMatrixViaValhalla in server.js).
+describe("walk-only routing survives OSRM+Google both being unusable", () => {
+  test("/api/optimize still succeeds via Valhalla when OSRM's walking leg and the Google fallback both fail", async () => {
+    const s = await startServer({
+      env: {
+        ROUTING_SOURCE: "osrm", GEOCODING_SOURCE: "swisstopo", APP_PASSWORD: "",
+        VALHALLA_URL: "http://localhost:8002",
+        OSRM_URL: "http://osrm-driving.test",
+        OSRM_URL_WALKING: "http://osrm-walking.test",
+      },
+      config: {
+        osrmProfileByHost: { "osrm-driving.test": "driving", "osrm-walking.test": "walking" },
+        osrmDownForProfile: "walking", // the DRIVING instance is fine — only walking is unreachable, the realistic case
+        googleDistanceMatrixDown: true, // the only other fallback also doesn't work
+      },
+    });
+    try {
+      const res = await postJson(s.baseUrl, "/api/optimize", {
+        addresses: ["A Bern", "B Bern", "C Bern"], mode: "driving", restricted: [false, true, false],
+      });
+      assert.strictEqual(
+        res.status, 200,
+        "Valhalla estava configurado e a funcionar — nao devia ter falhado so porque OSRM e a Google falharam"
+      );
+      assert.deepStrictEqual([...res.body.order].sort((a, b) => a - b), [0, 1, 2]);
     } finally { await s.stop(); }
   });
 });

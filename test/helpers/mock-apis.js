@@ -158,13 +158,24 @@ global.fetch = async (url, ...rest) => {
     // up "A->B direct has no route, but A->(some other point) does" for
     // the Access Manager, which plain valhallaNoRoute (blocks EVERY
     // excluded pair alike) can't express.
+    //
+    // Checked against every CONSECUTIVE pair, not just a literal 2-point
+    // body: a real multi-stop Valhalla /route request fails outright if
+    // ANY one of its internal legs has no path — a mock that only ever
+    // failed a plain A-B probe let a whole-trip request sail through a
+    // blocked pair sitting in the middle of a longer stop list, which
+    // masked a real bug (the whole-trip route call not knowing about an
+    // Access-Manager-rescued matrix edge and failing where the matrix
+    // itself reported one as fine).
     const reqLocations = body.locations || [];
-    if (reqLocations.length === 2 && isExactPairBlocked(reqLocations[0], reqLocations[1])) {
-      return {
-        ok: false,
-        status: 400,
-        json: async () => ({ error_code: 442, error: "No path could be found for input" }),
-      };
+    for (let i = 0; i < reqLocations.length - 1; i++) {
+      if (isExactPairBlocked(reqLocations[i], reqLocations[i + 1])) {
+        return {
+          ok: false,
+          status: 400,
+          json: async () => ({ error_code: 442, error: "No path could be found for input" }),
+        };
+      }
     }
     const locations = body.locations || [];
     const shape = encodePolyline6(locations.map((l) => [l.lat, l.lon]));
@@ -182,13 +193,19 @@ global.fetch = async (url, ...rest) => {
   if (raw.includes("/route/v1/") || raw.includes("/table/v1/")) {
     record("osrm");
     if (cfg.osrmDown) throw new Error("OSRM indisponivel (teste)");
+    const profile = u.pathname.split("/")[3];
+    // Same idea as cfg.osrmDown, but only for ONE profile — a real setup
+    // very often has a perfectly reachable driving instance and no
+    // (or a dead) walking one, not both down together.
+    if (cfg.osrmDownForProfile && profile === cfg.osrmDownForProfile) {
+      throw new Error(`OSRM (${profile}) indisponivel (teste)`);
+    }
     // Mirrors a real single-profile OSRM instance (see routing.js's "one
     // instance = one profile" note): cfg.osrmProfileByHost maps a
     // hostname (so OSRM_URL and OSRM_URL_WALKING can point at two
     // different mock "instances" in the same test) to the ONLY profile
     // segment it accepts — anything else 400s, exactly like a real
     // walking-only instance rejecting a "/driving/" request.
-    const profile = u.pathname.split("/")[3];
     const expectedProfile = (cfg.osrmProfileByHost || {})[u.hostname];
     if (expectedProfile && profile !== expectedProfile) {
       return { ok: false, status: 400, json: async () => ({ code: "InvalidUrl", message: "Profile not found" }) };
@@ -218,6 +235,15 @@ global.fetch = async (url, ...rest) => {
 
   if (u.pathname.includes("distancematrix")) {
     record("google-distance");
+    // A real "the fallback ALSO doesn't work" case — an invalid/restricted
+    // key, the API not enabled, billing not set up — all surface as this
+    // same status rather than a network-level throw, which behaves very
+    // differently upstream (buildDurationMatrix only catches OSRM/Valhalla
+    // throwing; Google answering 200 with an error status wasn't caught by
+    // anything at all).
+    if (cfg.googleDistanceMatrixDown) {
+      return { json: async () => ({ status: "REQUEST_DENIED" }) };
+    }
     const origins = (u.searchParams.get("origins") || "").split("|");
     const dests = (u.searchParams.get("destinations") || "").split("|");
     return {
@@ -260,6 +286,30 @@ global.fetch = async (url, ...rest) => {
   if (u.pathname.includes("place/")) {
     record("google-places");
     return { json: async () => ({ status: "ZERO_RESULTS" }) };
+  }
+
+  // French station-price feed (src/fuel.js). cfg.fuelStations: array of
+  // { gazole_prix, ville, d } rows to return (default: three stations);
+  // cfg.fuelApiDown: throw like a network failure; [] means "nothing in
+  // range".
+  if (u.hostname === "data.economie.gouv.fr") {
+    record("fuel-api");
+    if (cfg.fuelApiDown) throw new Error("fuel API indisponivel (teste)");
+    const rows = cfg.fuelStations || [
+      { gazole_prix: 2.30, ville: "Chamonix", d: 40000 },
+      { gazole_prix: 2.40, ville: "Abondance", d: 41000 },
+      { gazole_prix: 2.20, ville: "Samoens", d: 42000 },
+    ];
+    return { ok: true, json: async () => ({ total_count: rows.length, results: rows }) };
+  }
+
+  // ECB rates (src/fuel.js). cfg.fxRate overrides the EUR->target rate;
+  // cfg.fxDown throws.
+  if (u.hostname === "api.frankfurter.dev" || u.hostname === "api.frankfurter.app") {
+    record("fx-api");
+    if (cfg.fxDown) throw new Error("FX API indisponivel (teste)");
+    const to = u.searchParams.get("to") || "CHF";
+    return { ok: true, json: async () => ({ amount: 1, base: "EUR", date: "2026-09-14", rates: { [to]: typeof cfg.fxRate === "number" ? cfg.fxRate : 0.95 } }) };
   }
 
   if (u.hostname === "ip-api.com") {

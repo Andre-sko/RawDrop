@@ -26,6 +26,7 @@ function loadMapHelpers() {
 const {
   buildCumulative, pointAtDistance, computeStopMarkers,
   sliceCoordsBetween, legEndForDistance, pickClosestFeature,
+  pointInPolygon, computeAnimationDuration, computeAnimationZoom,
 } = loadMapHelpers();
 
 // ~111 km per degree of latitude, so 0.001° is ~111 m. Routes below are
@@ -219,5 +220,78 @@ describe("pickClosestFeature", () => {
     const dup11 = { properties: { seq: 11 }, geometry: { coordinates: at(46.9) } };
     const picked = pickClosestFeature([dup11, stop10], at(46.9));
     assert.strictEqual(picked.properties.seq, 10, "paragens sobrepostas devem mostrar o numero visivel no mapa");
+  });
+});
+
+// Backs the "draw a shape, group the addresses inside it as walk-only"
+// map tool: which already-plotted stops fall inside the freehand shape
+// the driver just drew. Standard ray-casting, so it works for whatever
+// shape a mouse drag happens to produce — never assumes a rectangle or a
+// convex hull.
+describe("pointInPolygon", () => {
+  // A simple 10x10 square (in degrees, size is irrelevant to the algorithm).
+  const square = [[0, 0], [10, 0], [10, 10], [0, 10]];
+
+  test("a point well inside the square is inside", () => {
+    assert.strictEqual(pointInPolygon([5, 5], square), true);
+  });
+
+  test("a point well outside the square is outside", () => {
+    assert.strictEqual(pointInPolygon([15, 15], square), false);
+  });
+
+  test("works the same whether the ring is explicitly closed or not", () => {
+    const closed = square.concat([square[0]]);
+    assert.strictEqual(pointInPolygon([5, 5], closed), true);
+    assert.strictEqual(pointInPolygon([15, 15], closed), false);
+  });
+
+  // A "C"-shaped (concave) polygon — the one case a bounding-box check
+  // would get wrong, which is exactly why this uses real ray-casting.
+  test("a concave polygon correctly excludes points in its notch", () => {
+    const cShape = [
+      [0, 0], [10, 0], [10, 4], [4, 4], [4, 6], [10, 6], [10, 10], [0, 10],
+    ];
+    assert.strictEqual(pointInPolygon([2, 5], cShape), true, "dentro do corpo do C");
+    assert.strictEqual(pointInPolygon([7, 5], cShape), false, "dentro do entalhe do C, fora da forma");
+  });
+
+  test("a point outside a real-world-scale (lng,lat) shape is excluded", () => {
+    const neighbourhood = [[7.440, 46.945], [7.450, 46.945], [7.450, 46.955], [7.440, 46.955]];
+    assert.strictEqual(pointInPolygon([7.445, 46.950], neighbourhood), true);
+    assert.strictEqual(pointInPolygon([7.500, 46.950], neighbourhood), false);
+  });
+});
+
+describe("computeAnimationDuration", () => {
+  test("a very short route is clamped to the minimum duration", () => {
+    assert.strictEqual(computeAnimationDuration(100), 8000);
+  });
+
+  test("a very long route is clamped to the maximum duration", () => {
+    assert.strictEqual(computeAnimationDuration(25000), 120000);
+  });
+
+  test("a mid-length route scales with distance, unclamped", () => {
+    // 2500m at the 25 m/s reference pace is exactly 100s.
+    assert.strictEqual(computeAnimationDuration(2500), 100000);
+  });
+});
+
+describe("computeAnimationZoom", () => {
+  test("a next stop right on top of the marker gets the tightest zoom", () => {
+    assert.strictEqual(computeAnimationZoom(150), 16);
+    assert.strictEqual(computeAnimationZoom(50), 16); // even closer than the "near" threshold
+  });
+
+  test("a far-off next stop gets the widest zoom", () => {
+    assert.strictEqual(computeAnimationZoom(3000), 11);
+    assert.strictEqual(computeAnimationZoom(10000), 11); // even farther than the "far" threshold
+  });
+
+  test("zoom never leaves [MIN_ANIMATION_ZOOM, MAX_ANIMATION_ZOOM] and interpolates in between", () => {
+    const midway = computeAnimationZoom(1575); // halfway between the near/far thresholds
+    assert.ok(midway > 11 && midway < 16, `esperado entre 11 e 16, veio ${midway}`);
+    assert.ok(Math.abs(midway - 13.5) < 1e-9);
   });
 });

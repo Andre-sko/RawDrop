@@ -61,6 +61,45 @@ describe("route optimization", () => {
       assert.deepStrictEqual(sorted, [0, 1, 2, 3, 4], "nao pode perder nem duplicar paragens");
     } finally { await s.stop(); }
   });
+
+  // Feature test for the interface's manual drag/edit-position controls:
+  // the client reorders `addresses` itself (a stop dragged to a new spot
+  // is already sitting at that index by the time this request is sent),
+  // and lockedIndices tells the optimizer which indices to leave exactly
+  // where they are — see optimizeOrder's own doc comment in
+  // src/optimizer.js for why a lock is always "stay at your own index"
+  // rather than an arbitrary remap.
+  test("lockedIndices keeps a manually placed stop in position while optimizing the rest around it", async () => {
+    const s = await startServer({
+      env: { GEOCODING_SOURCE: "swisstopo", ROUTING_SOURCE: "google" },
+      config: {
+        matrix: {
+          "A Bern|B Bern": 3000, "B Bern|A Bern": 3000,
+          "A Bern|C Bern": 1000, "C Bern|A Bern": 1000,
+          "A Bern|D Bern": 2000, "D Bern|A Bern": 2000,
+          "B Bern|C Bern": 2000, "C Bern|B Bern": 2000,
+          "B Bern|D Bern": 1000, "D Bern|B Bern": 1000,
+          "C Bern|D Bern": 1000, "D Bern|C Bern": 1000,
+        },
+      },
+    });
+    try {
+      const addresses = ["A Bern", "B Bern", "C Bern", "D Bern"];
+
+      const free = await postJson(s.baseUrl, "/api/optimize", { addresses, mode: "driving" });
+      assert.strictEqual(free.status, 200);
+      assert.notStrictEqual(free.body.order[1], 1, "pre-condicao: sem bloqueio, B nao fica em 2o lugar");
+
+      const locked = await postJson(s.baseUrl, "/api/optimize", {
+        addresses, mode: "driving", lockedIndices: [1],
+      });
+      assert.strictEqual(locked.status, 200);
+      assert.deepStrictEqual(
+        locked.body.order, [0, 1, 3, 2],
+        "B tem de ficar preso na posicao 1; C e D continuam otimizados entre si"
+      );
+    } finally { await s.stop(); }
+  });
 });
 
 describe("OSRM walk-only stops", () => {

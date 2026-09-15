@@ -216,12 +216,61 @@
   .block-label .num{
     color:var(--amber);
   }
+  /* Sections 01-07 collapse on their own title click, default open —
+     purely visual (display:none), so nothing inside stops working when
+     hidden, it just isn't shown. */
+  .sidebar-section > .block-label{
+    cursor:pointer;
+    user-select:none;
+  }
+  .sidebar-section > .block-label::after{
+    content:'▾';
+    margin-left:auto;
+    color:var(--text-faint);
+    font-size:10px;
+    transition:transform 0.15s ease;
+  }
+  .sidebar-section.collapsed > .block-label::after{
+    transform:rotate(-90deg);
+  }
+  .sidebar-section.collapsed > *:not(.block-label){
+    display:none;
+  }
 
   label.field-label{
     display:block;
     font-size:12.5px;
     color:var(--text-dim);
     margin-bottom:6px;
+  }
+  .field-label-row{
+    display:flex;
+    align-items:center;
+    justify-content:space-between;
+    gap:10px;
+  }
+  .field-label-row .field-label{margin-bottom:6px;}
+  /* Master on/off for every walk-only address at once — turns routing
+     restrictions off without deleting anything from data/blocked.json,
+     so it can be flipped back on later. Same --blue as the markers it
+     controls. */
+  .walk-only-master-toggle{
+    display:inline-flex;
+    align-items:center;
+    gap:5px;
+    font-size:11.5px;
+    color:var(--text-faint);
+    cursor:pointer;
+    user-select:none;
+    white-space:nowrap;
+  }
+  .walk-only-master-toggle input{
+    accent-color:var(--blue);
+    cursor:pointer;
+    margin:0;
+  }
+  .walk-only-master-toggle:has(input:checked){
+    color:var(--blue);
   }
 
   input[type="text"], input[type="password"], input[type="time"], input[type="number"], textarea{
@@ -253,6 +302,10 @@
     line-height:1.5;
   }
   .hint a{color:var(--amber-dim);}
+  .manifest-reorder-hint{
+    margin:0 0 10px;
+    color:var(--amber-dim);
+  }
 
   button{
     font-family:'Space Grotesk', sans-serif;
@@ -392,7 +445,7 @@
   .stop{
     position:relative;
     display:grid;
-    grid-template-columns:34px 1fr;
+    grid-template-columns:40px 1fr;
     gap:14px;
     padding-bottom:2px;
   }
@@ -403,18 +456,82 @@
     align-items:center;
   }
   .marker{
-    width:30px;height:30px;
-    border-radius:50%;
+    min-width:30px;height:30px;
+    padding:0 5px;
+    border-radius:15px;
     background:var(--panel-2);
     border:2px solid var(--amber-dim);
     color:var(--amber);
     font-family:'IBM Plex Mono',monospace;
     font-size:12px;
+    white-space:nowrap;
+    box-sizing:border-box;
     display:flex;align-items:center;justify-content:center;
     z-index:1;
     flex-shrink:0;
   }
+  /* 3+ digit stop numbers (100th delivery onward): a smaller size is what
+     actually keeps them fully inside the marker instead of spilling past
+     it into the address text next to it, which is what made them read as
+     "hidden" rather than just cramped. */
+  .marker.wide{font-size:10px; padding:0 4px;}
   .marker.final{border-color:var(--green); color:var(--green);}
+  /* Same --blue as .marker.pinned and the map's own walk-only markers —
+     one colour, one meaning ("the van doesn't drive here"), everywhere.
+     Declared after .final so a walk-only closing stop still reads blue
+     rather than green. */
+  .marker.walk-only{border-color:var(--blue); color:var(--blue);}
+  .marker.movable{cursor:grab;}
+  .marker.movable:active{cursor:grabbing;}
+  .marker.pinned{border-color:var(--blue); color:var(--blue); border-width:2.5px;}
+  .marker.drag-over{outline:2px dashed var(--blue); outline-offset:2px;}
+  /* input.marker-num-input (not just .marker-num-input): the generic
+     input[type="number"] rule above is an attribute selector, which
+     outranks a plain class on specificity alone — without the element
+     prefix here this whole block silently lost to it (11px padding,
+     13.5px font, both far too big for a 30px marker), which is exactly
+     why the digit was still hidden after just hiding the spin buttons. */
+  input.marker-num-input{
+    min-width:30px;height:30px;
+    border-radius:15px;
+    border:1px solid var(--blue);
+    background:var(--panel);
+    color:var(--text);
+    font-family:'IBM Plex Mono',monospace;
+    font-size:12px;
+    text-align:center;
+    padding:0 4px;
+    box-sizing:border-box;
+    /* Native up/down spinner buttons leave almost no room for the digit
+       itself in a box this small — same reason the office app never
+       uses type="number" for anything else. */
+    -moz-appearance:textfield;
+    appearance:textfield;
+  }
+  input.marker-num-input.wide{font-size:10px; padding:0 3px;}
+  input.marker-num-input::-webkit-outer-spin-button,
+  input.marker-num-input::-webkit-inner-spin-button{
+    -webkit-appearance:none;
+    margin:0;
+  }
+  .pin-badge{
+    position:absolute;
+    top:-6px; right:-6px;
+    width:15px;height:15px;
+    border-radius:50%;
+    background:var(--blue);
+    color:var(--bg);
+    font-size:9px;
+    display:flex;align-items:center;justify-content:center;
+    cursor:pointer;
+    z-index:2;
+  }
+  .undo-manual-order-btn{
+    width:100%;
+    text-align:center;
+    margin-top:8px;
+    font-size:12px;
+  }
   .track{
     width:2px;
     flex:1;
@@ -792,6 +909,128 @@
   }
   .map-comparison-panel{
     margin-bottom:14px;
+  }
+
+  /* "⛶ Ecrã inteiro": #mapSection is lifted over the whole page (the rest
+     stays in the DOM underneath, untouched) and the map canvas takes all
+     the height the toolbar/style row leave free. The stops panel and the
+     restriction lists scroll within the viewport instead of pushing it. */
+  body.map-fullscreen{overflow:hidden;}
+  body.map-fullscreen #mapSection{
+    position:fixed;
+    inset:0;
+    z-index:500;
+    background:var(--bg);
+    padding:12px 14px;
+    overflow:auto;
+    display:flex;
+    flex-direction:column;
+  }
+  body.map-fullscreen #mapSection .map-with-stops{
+    flex:1;
+    min-height:0;
+    align-items:stretch;
+  }
+  body.map-fullscreen #mapSection .map-main{
+    display:flex;
+    flex-direction:column;
+    min-height:0;
+  }
+  body.map-fullscreen #mapSection #mapContainer{
+    flex:1;
+    min-height:300px;
+    height:auto;
+  }
+  body.map-fullscreen #mapSection .stops-panel{
+    max-height:none;
+  }
+  body.map-fullscreen #mapSection #activeRestrictionsList,
+  body.map-fullscreen #mapSection #walkOnlyList{
+    max-height:22vh;
+    overflow:auto;
+  }
+  body.map-fullscreen .scroll-nav-btn{display:none;}
+
+  /* Sidebar: the three saved lists show only their newest entries; the
+     link below each opens the full editor (public/manage.html). */
+  .recent-list{max-height:none; overflow:visible;}
+  .manage-link{
+    display:flex;
+    align-items:center;
+    justify-content:center;
+    gap:6px;
+    width:100%;
+    box-sizing:border-box;
+    font-size:12px;
+    text-decoration:none;
+    margin-top:4px;
+  }
+  .manage-link .list-count{margin:0;}
+
+  /* /manage/<kind> page */
+  .manage-page header .header-controls{align-items:center;}
+  .manage-back{text-decoration:none; font-size:12.5px; padding:8px 14px;}
+  .manage-main{
+    max-width:1100px;
+    margin:0 auto;
+    padding:22px 24px 60px;
+  }
+  .manage-toolbar{
+    display:flex;
+    gap:10px;
+    align-items:center;
+    margin-bottom:14px;
+  }
+  .manage-toolbar .list-search-row{flex:1; margin:0;}
+  .manage-toolbar .btn-ghost{flex:0 0 auto; font-size:12.5px;}
+  .manage-toolbar .manage-export-row{margin-top:0; flex:0 0 auto;}
+  .manage-toolbar .manage-export-row .export-btn{flex:0 0 auto;}
+  .manage-table-wrap{
+    background:var(--panel);
+    border:1px solid var(--border);
+    border-radius:var(--radius);
+    overflow-x:auto;
+  }
+  .manage-table{
+    width:100%;
+    border-collapse:collapse;
+    font-size:13px;
+  }
+  .manage-table th, .manage-table td{
+    padding:9px 12px;
+    border-bottom:1px solid var(--border);
+    text-align:left;
+    vertical-align:middle;
+  }
+  .manage-table th{
+    font-family:'IBM Plex Mono', monospace;
+    font-size:11px;
+    letter-spacing:0.08em;
+    text-transform:uppercase;
+    color:var(--text-faint);
+    font-weight:500;
+  }
+  .manage-table tbody tr:last-child td{border-bottom:none;}
+  .manage-table tbody tr:hover{background:rgba(127,127,127,0.06);}
+  .manage-table tr.editing{background:rgba(232,163,61,0.08);}
+  .manage-table .num-col{width:42px; color:var(--amber); font-family:'IBM Plex Mono', monospace; font-size:12px;}
+  .manage-table .key-cell{font-weight:500;}
+  .manage-table .actions-col{width:1%; white-space:nowrap; text-align:right;}
+  .manage-table .actions-col .btn-ghost{
+    padding:5px 9px;
+    font-size:13px;
+    margin-left:4px;
+  }
+  .manage-table td input{
+    width:100%;
+    box-sizing:border-box;
+    padding:6px 9px;
+    font-size:13px;
+  }
+  .manage-page .empty-state{margin:0; border:none; border-radius:0;}
+  @media (max-width:700px){
+    .manage-main{padding:14px 12px 40px;}
+    .manage-toolbar{flex-direction:column; align-items:stretch;}
   }
 
   /* Stop info popup (click a numbered marker on the map) */
@@ -1302,6 +1541,30 @@
   }
   .verify-final-actions button{flex:1;}
   .verify-final-actions .btn-share-qr{flex:0 0 auto;}
+
+  /* Route export row under the totals: format <select> | download | QR,
+     all the same height so the three read as one control group. */
+  .route-export-row{
+    display:flex;
+    gap:8px;
+    margin-top:16px;
+    align-items:stretch;
+  }
+  .route-export-row select{
+    flex:0 0 auto;
+    background:var(--panel);
+    border:1px solid var(--border);
+    border-radius:8px;
+    color:var(--text);
+    padding:0 10px;
+    font-size:12.5px;
+    font-family:'IBM Plex Mono', monospace;
+  }
+  .route-export-row .export-btn{
+    flex:1;
+    text-align:center;
+  }
+  .route-export-row .btn-share-qr{flex:0 0 auto;}
 
   .spinner{
     display:inline-block;

@@ -1,0 +1,86 @@
+<!--
+  Route Tracker
+  Copyright (c) 2026 André Soares. All rights reserved.
+  See LICENSE at the project root.
+-->
+<!DOCTYPE html>
+<html lang="pt-PT">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1.0" />
+<title>Route Tracker</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Inter:wght@400;500&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/css/styles.css">
+<script>
+  // Same pre-paint theme read as index.html, so this tab matches the
+  // main one without a flash.
+  (function(){
+    try{
+      var saved = localStorage.getItem('route-tracker-theme');
+      if(saved === 'light' || saved === 'dark'){
+        document.documentElement.setAttribute('data-theme', saved);
+      }
+    } catch(e){ /* tema por omissão */ }
+  })();
+</script>
+</head>
+<body class="manage-page">
+
+<header>
+  <div class="logo-wrap">
+    <img src="/logo.png" alt="" width="44" height="44" class="logo-img" />
+    <h1 class="logo-name display" data-i18n="appTitle">Route Tracker</h1>
+  </div>
+  <div class="header-text">
+    <div class="eyebrow" id="manageEyebrow"></div>
+    <p id="manageDescription"></p>
+  </div>
+  <div class="header-controls">
+    <a class="btn-ghost manage-back" href="/" data-i18n="manageBackBtn">← Voltar</a>
+  </div>
+</header>
+
+<main class="manage-main">
+  <div class="manage-toolbar">
+    <div class="list-search-row">
+      <input type="text" id="manageSearch" data-i18n-placeholder="searchPlaceholder" placeholder="Pesquisar…" autofocus />
+      <span class="list-count" id="manageCount"></span>
+    </div>
+    <button class="btn-ghost" id="manageAddBtn" type="button" data-i18n="manageAddBtn">+ Adicionar</button>
+    <div class="route-export-row manage-export-row" id="manageExportRow" hidden>
+      <select id="manageExportFormat">
+        <option value="txt">TXT</option>
+        <option value="csv">CSV</option>
+        <option value="json">JSON</option>
+      </select>
+      <button class="btn-ghost export-btn" id="manageExportBtn" type="button"></button>
+      <button class="btn-share-qr" id="manageExportQrBtn" type="button" data-i18n-title="qrShareBtnTitle" title="Partilhar por QR code">📱</button>
+    </div>
+  </div>
+  <div id="manageStatus"></div>
+  <div class="manage-table-wrap">
+    <table class="manage-table">
+      <thead><tr id="manageHead"></tr></thead>
+      <tbody id="manageBody"></tbody>
+    </table>
+    <div id="manageEmpty" class="empty-state" style="display:none;"></div>
+  </div>
+</main>
+
+<div class="qr-modal-overlay" id="qrModalOverlay">
+  <div class="qr-modal">
+    <button class="qr-modal-close" id="qrModalClose" title="Fechar">✕</button>
+    <h3 data-i18n="qrModalTitle">Digitaliza noutro dispositivo</h3>
+    <img class="qr-modal-image" id="qrModalImage" alt="QR code" />
+    <div id="qrModalNote"></div>
+    <div class="qr-modal-url" id="qrModalUrl"></div>
+    <button class="btn-ghost" id="qrModalCopyBtn" data-i18n="qrModalCopyBtn" style="width:100%;">Copiar link</button>
+    <div class="qr-modal-expiry" id="qrModalExpiry"></div>
+  </div>
+</div>
+
+<script src="/js/translations.js"></script>
+<script src="/js/manage.js"></script>
+</body>
+</html>

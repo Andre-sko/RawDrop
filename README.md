@@ -408,6 +408,37 @@ curl -X DELETE http://localhost:3000/api/cache -H "Content-Type: application/jso
 
 (Requires an authenticated session if `APP_PASSWORD` is set.)
 
+## Fuel price (section 08, exports)
+
+The fuel cost line in CSV/TXT exports uses a price per litre that comes
+from the first of three sources that works:
+
+1. **Live** — the French government's open station-price feed
+   (every French station reports its own prices, refreshed every 10
+   minutes, no key). The server averages the diesel price of the
+   stations nearest the route's starting point and converts EUR to
+   `FUEL_CURRENCY` at the ECB reference rate (Frankfurter, also keyless).
+   Switzerland has no equivalent public feed — from the Valais the nearest
+   French stations (Chamonix / Abondance, ~35–45 km) are the closest thing
+   to a real, current local price.
+2. **Manual** — the fallback price and the van's consumption typed into
+   section 08 of the sidebar (saved to `data/fuel-settings.json`). Used
+   whenever the live lookup fails: no network, no station within range,
+   FX service down.
+3. A static per-country table in `server.js`, as a last resort.
+
+Section 08 always shows which source is in effect. Both external calls
+are cached (prices 1 h, FX rate 24 h). Nothing needs configuring; the
+defaults can be overridden in `.env`:
+
+```bash
+FUEL_CURRENCY=CHF          # what the estimate is shown in; EUR skips the conversion
+FUEL_PRICE_RADIUS_KM=80    # how far from the route's start to look for French stations
+FUEL_PRICE_STATIONS=10     # how many of the nearest stations to average
+FUEL_PRICE_API_URL=https://data.economie.gouv.fr/api/explore/v2.1/catalog/datasets/prix-des-carburants-en-france-flux-instantane-v2/records
+FUEL_FX_API_URL=https://api.frankfurter.dev/v1/latest
+```
+
 ## QR code sharing
 
 Every export (route, address list, Fix Addresses list) has a 📱
@@ -433,6 +464,105 @@ fails to connect, check in order: the firewall on the server machine
 (`sudo ufw allow 3000/tcp`), that both devices share a network (not
 mobile data), and — on a VM — that the network adapter is **Bridged**,
 not NAT-only.
+
+## Driver app (PWA): stable HTTPS access from a phone
+
+The 📱 **"Partilhar com condutor"** button on the map screen creates a
+24h-lived, trackable route (see `src/routeShares.js`) and opens it in an
+installable PWA at `/pwa/` — the driver scans the QR once, adds it to
+their home screen, and uses it offline all day (see `public/pwa/`).
+Two things make this different from the plain QR-export sharing above,
+and both come with a real constraint:
+
+- **The QR scanner needs the camera.** Browsers only grant camera access
+  (`getUserMedia`) on a "secure context" — HTTPS, or `localhost` itself.
+  Opening the app over plain `http://<lan-ip>:3000` from a phone (fine
+  for everything else in this README) will **not** let the driver scan
+  a QR code at all.
+- **IndexedDB is bound to the origin** (scheme + hostname + port) —
+  everything the PWA stores (the route, delivery statuses, the pending
+  sync queue) lives under whatever hostname the driver first opened the
+  app from. Change that hostname later and every phone's local data
+  becomes unreachable — not corrupted, not lost from the server (route
+  shares themselves live in `data/route-shares.json`), just invisible to
+  the app that wrote it, because a browser never lets one origin read
+  another's storage.
+
+**The hostname the driver installs the app under has to be stable from
+day one.** Don't pick something you plan to change later (a temporary
+LAN IP, a router's dynamic DNS you might swap, an ngrok URL that
+rotates on every restart). [Tailscale Funnel](https://tailscale.com/kb/1223/funnel)
+gives a free, fixed `.ts.net` hostname with automatic HTTPS, with no
+domain purchase required — a good default for exactly this constraint.
+
+### Setting it up
+
+1. Install Tailscale on the machine running this server and join your
+   tailnet: <https://tailscale.com/download>, then `tailscale up`.
+2. In the [admin console](https://login.tailscale.com/admin/settings/general),
+   enable **HTTPS Certificates** and **Funnel** for your tailnet
+   (one-time, account-level settings — Funnel is off by default).
+3. Expose this app's port (`PORT` in `.env`, default `3000`) publicly,
+   keeping it running in the background:
+
+   ```bash
+   sudo tailscale funnel --bg 3000
+   ```
+
+4. Check the assigned hostname and that Funnel is actually serving it:
+
+   ```bash
+   tailscale funnel status
+   ```
+
+   You'll get something like `https://your-machine.your-tailnet.ts.net`
+   — that HTTPS URL, on port 443, is what Funnel forwards to your local
+   port 3000. **This is the hostname every driver's phone should use,
+   for as long as this app runs** — bookmark it, don't rediscover it.
+
+5. Set it explicitly as `SHARE_HOST` in `.env`, so every generated QR
+   link uses it instead of the LAN-IP auto-detection meant for the
+   same-network case above:
+
+   ```
+   SHARE_HOST=your-machine.your-tailnet.ts.net
+   ```
+
+Funnel terminates HTTPS itself and forwards plain HTTP to your local
+`PORT` — nothing else in this app needs to change. `tailscale funnel
+status` and `tailscale funnel --bg 3000` are also how you check it's
+still running and restart it after a reboot (Tailscale itself normally
+survives a reboot once enabled as a service; Funnel's exposure does not
+restart on its own on every platform — check `tailscale funnel status`
+after rebooting the server machine).
+
+### Migrating to your own domain later
+
+If you outgrow the `.ts.net` hostname and move to a real domain
+(`entregas.example.com`, fronted by Tailscale Funnel, a reverse proxy,
+or anything else), that is, from the browser's point of view, a
+**completely different origin** — every driver's phone starts with
+empty IndexedDB under it, exactly as if they'd never scanned a QR
+before. There is no automatic way to carry that local data across a
+hostname change; plan around it instead of trying to migrate it:
+
+- **Do it between routes, not mid-route.** Let every driver finish
+  their current day (or at least sync their last pending marks —
+  the "N por sincronizar" badge should read 0) under the old hostname
+  before switching.
+- **The server-side data survives regardless.** A route share's stops
+  and statuses already synced live in `data/route-shares.json`, not in
+  the browser — switching hostnames doesn't touch that. What's lost is
+  only whatever a phone had marked locally but not yet synced, plus the
+  convenience of the already-installed home-screen icon.
+- **Re-onboarding is just a re-scan.** A driver on the new domain gets
+  a fresh install by scanning a new QR code (or opening a fresh
+  `/pwa/?token=...` link) generated from the new hostname — the app
+  doesn't need any special "migration mode".
+- Update `SHARE_HOST` to the new hostname and re-issue Tailscale
+  Funnel/your reverse proxy against it before generating any new route
+  shares, so the QR codes you hand out already point to where you're
+  moving to, not where you're moving from.
 
 ## Google API request log
 

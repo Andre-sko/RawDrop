@@ -1,0 +1,175 @@
+// Unit tests for src/routeShares.js — the disk-backed store behind the
+// QR "share a route with the driver's phone" feature. No server, no
+// network: DATA_DIR is pointed at a throwaway temp directory before the
+// module (and its config.js dependency) is ever required, so this never
+// touches the real data/route-shares.json.
+
+const os = require("os");
+const path = require("path");
+const fs = require("fs");
+const { test, describe, before, after } = require("node:test");
+const assert = require("node:assert");
+
+const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "route-shares-test-"));
+process.env.DATA_DIR = tempDir;
+
+const { createRouteShare, getRouteShare, getShareStatus, updateStopStatus } = require("../src/routeShares");
+
+after(() => {
+  fs.rmSync(tempDir, { recursive: true, force: true });
+});
+
+function makeShare(overrides = {}) {
+  return createRouteShare({
+    addresses: ["Rua A 1", "Rua B 2", "Rua C 3"],
+    coords: [{ lat: 46.2, lng: 7.3 }, null, { lat: 46.4, lng: 7.5 }],
+    deadlines: ["09:00", null, "10:30"],
+    roundTrip: false,
+    ...overrides,
+  });
+}
+
+describe("createRouteShare", () => {
+  test("builds one stop per address, in order, with stable-shaped ids", () => {
+    const share = makeShare();
+    assert.strictEqual(share.stops.length, 3);
+    share.stops.forEach((s, i) => {
+      assert.strictEqual(s.order, i);
+      assert.match(s.id, /^\d+-[0-9a-f]{8}$/);
+      assert.strictEqual(s.status, "pending");
+    });
+  });
+
+  test("carries coords and deadlines through 1:1, nulling out missing ones", () => {
+    const share = makeShare();
+    assert.deepStrictEqual(
+      share.stops.map((s) => [s.lat, s.lng, s.deadline]),
+      [[46.2, 7.3, "09:00"], [null, null, null], [46.4, 7.5, "10:30"]]
+    );
+  });
+
+  test("persists to disk immediately", () => {
+    const share = makeShare();
+    const onDisk = JSON.parse(fs.readFileSync(path.join(tempDir, "route-shares.json"), "utf-8"));
+    assert.ok(onDisk.some((s) => s.token === share.token));
+  });
+
+  test("two shares get two different, long random tokens", () => {
+    const a = makeShare();
+    const b = makeShare();
+    assert.notStrictEqual(a.token, b.token);
+    assert.ok(a.token.length >= 64); // 32 random bytes, hex-encoded
+  });
+});
+
+describe("getRouteShare", () => {
+  test("returns null for an unknown token", () => {
+    assert.strictEqual(getRouteShare("does-not-exist"), null);
+  });
+
+  test("still finds a share shortly after expiresAt (sync-retry grace period)", () => {
+    const share = makeShare();
+    share.expiresAt = new Date(Date.now() - 1000).toISOString();
+    const found = getRouteShare(share.token);
+    assert.ok(found);
+    assert.strictEqual(found.token, share.token);
+  });
+
+  test("stops finding a share once past the retention window", () => {
+    const share = makeShare();
+    share.expiresAt = new Date(Date.now() - 25 * 60 * 60 * 1000).toISOString(); // 25h ago, past the 24h grace
+    assert.strictEqual(getRouteShare(share.token), null);
+  });
+});
+
+describe("getShareStatus", () => {
+  test("reports not found for an unknown token", () => {
+    const status = getShareStatus("does-not-exist");
+    assert.strictEqual(status.found, false);
+  });
+
+  test("reports found + not expired for a fresh share", () => {
+    const share = makeShare();
+    const status = getShareStatus(share.token);
+    assert.strictEqual(status.found, true);
+    assert.strictEqual(status.expired, false);
+  });
+
+  test("reports found + expired (not a bare not-found) once past expiresAt but within retention", () => {
+    const share = makeShare();
+    share.expiresAt = new Date(Date.now() - 1000).toISOString();
+    const status = getShareStatus(share.token);
+    assert.strictEqual(status.found, true);
+    assert.strictEqual(status.expired, true);
+  });
+});
+
+describe("updateStopStatus", () => {
+  test("marks a stop delivered and stamps both timestamps", () => {
+    const share = makeShare();
+    const stopId = share.stops[0].id;
+    const clientTimestamp = new Date().toISOString();
+
+    const result = updateStopStatus(share.token, stopId, { status: "delivered", clientTimestamp });
+
+    assert.strictEqual(result.applied, true);
+    assert.strictEqual(result.stop.status, "delivered");
+    assert.strictEqual(result.stop.statusReason, null);
+    assert.strictEqual(result.stop.clientTimestamp, clientTimestamp);
+    assert.ok(result.stop.serverTimestamp);
+  });
+
+  test("keeps the reason only for a failed stop", () => {
+    const share = makeShare();
+    const stopId = share.stops[0].id;
+
+    const failed = updateStopStatus(share.token, stopId, { status: "failed", reason: "ninguem em casa" });
+    assert.strictEqual(failed.stop.statusReason, "ninguem em casa");
+
+    const delivered = updateStopStatus(share.token, stopId, { status: "delivered", reason: "ignored" });
+    assert.strictEqual(delivered.stop.statusReason, null);
+  });
+
+  test("marking the same stop the same way twice does not error or change the outcome", () => {
+    const share = makeShare();
+    const stopId = share.stops[0].id;
+    const clientTimestamp = new Date().toISOString();
+
+    const first = updateStopStatus(share.token, stopId, { status: "delivered", clientTimestamp });
+    const second = updateStopStatus(share.token, stopId, { status: "delivered", clientTimestamp });
+
+    assert.strictEqual(first.stop.status, "delivered");
+    assert.strictEqual(second.stop.status, "delivered");
+    assert.strictEqual(second.applied, true);
+  });
+
+  test("a stale, out-of-order sync retry does not overwrite a newer update", () => {
+    const share = makeShare();
+    const stopId = share.stops[0].id;
+    const older = new Date(Date.now() - 60000).toISOString();
+    const newer = new Date().toISOString();
+
+    updateStopStatus(share.token, stopId, { status: "failed", reason: "portao fechado", clientTimestamp: newer });
+    const stale = updateStopStatus(share.token, stopId, { status: "delivered", clientTimestamp: older });
+
+    assert.strictEqual(stale.applied, false);
+    assert.strictEqual(stale.stop.status, "failed");
+    assert.strictEqual(stale.stop.statusReason, "portao fechado");
+  });
+
+  test("rejects an invalid status without touching the stop", () => {
+    const share = makeShare();
+    const stopId = share.stops[0].id;
+
+    const result = updateStopStatus(share.token, stopId, { status: "done" });
+
+    assert.strictEqual(result.error, "invalid_status");
+    assert.strictEqual(getRouteShare(share.token).stops[0].status, "pending");
+  });
+
+  test("reports an unknown token or stop id distinctly", () => {
+    const share = makeShare();
+    assert.strictEqual(updateStopStatus("nope", share.stops[0].id, { status: "delivered" }).error, "not_found");
+    assert.strictEqual(updateStopStatus(share.token, "nope", { status: "delivered" }).error, "stop_not_found");
+  });
+});

@@ -22,7 +22,7 @@ const {
   VALID_ROUTING_SOURCES, ROUTING_SOURCE, OSRM_URL, OSRM_URL_WALKING,
   VALHALLA_URL, MAX_BLOCK_SEGMENT_METERS,
   DATA_DIR, ALIASES_FILE, BLOCKED_FILE, DELIVERY_TIMES_FILE,
-  GEOCODE_CACHE_FILE, DISTANCE_CACHE_FILE, anthropic,
+  GEOCODE_CACHE_FILE, DISTANCE_CACHE_FILE, anthropic, FUEL_CURRENCY,
 } = require("./src/config");
 const {
   GEOCODE_CACHE_TTL_MS, DISTANCE_CACHE_TTL_MS,
@@ -35,6 +35,7 @@ const {
 } = require("./src/api-log");
 const { geocodeAddressBest } = require("./src/geocoding");
 const { osrmSingleLeg, buildMixedDurationMatrix, overlayWalkingMatrix, resolveToCoords } = require("./src/routing");
+const fuel = require("./src/fuel");
 const { valhallaRoute, valhallaRouteMixed, valhallaRouteAllowingGaps, valhallaMatrix, findAccessibleRoute, ValhallaNoRouteError } = require("./src/valhalla");
 const {
   snapPointToRoute, sliceRouteBetween, bufferSegment, trimSegmentToLength,
@@ -47,6 +48,9 @@ const {
 const {
   setOverride: setAccessOverride, deleteOverride: deleteAccessOverride,
 } = require("./src/accessOverrides");
+const {
+  ROUTE_SHARE_TTL_MS, createRouteShare, getRouteShare, getShareStatus, updateStopStatus,
+} = require("./src/routeShares");
 
 // Resolves addresses to [lng, lat] points, skipping any that fail to
 // geocode — used only to decide which restrictions are geographically
@@ -163,6 +167,11 @@ app.use(express.json({ limit: "10mb" }));
 // something you wouldn't want falling into the wrong hands. Links
 // expire automatically after SHARE_TTL_MS and are never persisted to
 // disk, so they also don't survive a server restart.
+//
+// A shared, trackable ROUTE (full stop list + delivery status, meant to
+// last a whole work day) is a different thing and does NOT live here —
+// see src/routeShares.js for that store, which persists to disk with a
+// much longer TTL.
 // -----------------------------------------------------------------------
 const shareStore = new Map(); // token -> { content, filename, mime, createdAt } OR { type: "addresses", addresses, createdAt }
 const SHARE_TTL_MS = 30 * 60 * 1000; // 30 minutes
@@ -246,29 +255,92 @@ function renderAddressesSharePage(addresses) {
 // meant to be opened from a phone that isn't logged into the app at all.
 // Registered here, before the password-protection middleware below, so
 // it's never blocked by it even when APP_PASSWORD is set.
+//
+// Export links (see shareStore above) are served inline, exactly as
+// before. Anything else is treated as a route-share candidate (see
+// src/routeShares.js) — even one that turns out not to exist or to have
+// expired — and handed to the installable driver app at /pwa/, which
+// calls GET /api/share/:token itself and is what actually shows a
+// proper "link inválido/expirado" screen instead of a bare 404 page.
 app.get("/shared/:token", (req, res) => {
   const entry = shareStore.get(req.params.token);
-  if (!entry || Date.now() - entry.createdAt > SHARE_TTL_MS) {
-    return res
-      .status(404)
-      .send("This link has expired or does not exist. Export again from the app to get a new one.");
-  }
-
-  if (entry.type === "addresses") {
-    const format = req.query.format;
-    if (format === "csv" || format === "txt" || format === "json") {
-      const file = buildAddressesFileForFormat(entry.addresses, format);
-      res.setHeader("Content-Type", `${file.mime}; charset=utf-8`);
-      res.setHeader("Content-Disposition", `attachment; filename="${file.filename}"`);
-      return res.send(file.content);
+  if (entry && Date.now() - entry.createdAt <= SHARE_TTL_MS) {
+    if (entry.type === "addresses") {
+      const format = req.query.format;
+      if (format === "csv" || format === "txt" || format === "json") {
+        const file = buildAddressesFileForFormat(entry.addresses, format);
+        res.setHeader("Content-Type", `${file.mime}; charset=utf-8`);
+        res.setHeader("Content-Disposition", `attachment; filename="${file.filename}"`);
+        return res.send(file.content);
+      }
+      res.setHeader("Content-Type", "text/html; charset=utf-8");
+      return res.send(renderAddressesSharePage(entry.addresses));
     }
-    res.setHeader("Content-Type", "text/html; charset=utf-8");
-    return res.send(renderAddressesSharePage(entry.addresses));
+
+    res.setHeader("Content-Type", "text/plain; charset=utf-8");
+    res.setHeader("Content-Disposition", `inline; filename="${entry.filename}"`);
+    return res.send(entry.content);
   }
 
-  res.setHeader("Content-Type", "text/plain; charset=utf-8");
-  res.setHeader("Content-Disposition", `inline; filename="${entry.filename}"`);
-  res.send(entry.content);
+  res.redirect(`/pwa/?token=${encodeURIComponent(req.params.token)}`);
+});
+
+// /pwa/* — the installable driver app (Phase 2): a separate, public,
+// login-free static bundle. Registered here (before the password
+// middleware below) for the same reason as GET /shared/:token above —
+// the driver's phone never logs into the office app at all. Kept as its
+// own mount (not part of the shared `public/` static block near the
+// bottom of this file) specifically so its service worker's default
+// scope is "/pwa/" and can never intercept requests from the office app
+// at "/".
+app.get("/pwa/sw.js", (req, res, next) => {
+  // Browsers already re-check a service worker file on every navigation,
+  // but an intermediate cache (or an aggressive one on the phone itself)
+  // holding onto a stale copy would delay every future update reaching
+  // an already-installed app — not worth risking for one small file.
+  res.setHeader("Cache-Control", "no-cache");
+  next();
+});
+app.use("/pwa", express.static(path.join(__dirname, "public", "pwa")));
+
+// GET /api/share/:token — deliberately public (no login required, same
+// reasoning as GET /shared/:token above, and registered here for the
+// same reason): this is the JSON counterpart the PWA's scanner (Phase 2)
+// actually calls after decoding the QR code, so it needs to work on a
+// phone that never logged into the app. The token IS the access control
+// — see src/routeShares.js's module comment.
+app.get("/api/share/:token", (req, res) => {
+  const status = getShareStatus(req.params.token);
+  if (!status.found) {
+    return res.status(404).json({ error: "link invalido", reason: "not_found" });
+  }
+  if (status.expired) {
+    return res.status(410).json({ error: "rota expirada", reason: "expired" });
+  }
+  const share = status.share;
+  res.json({
+    token: share.token,
+    expiresAt: share.expiresAt,
+    route: { roundTrip: share.roundTrip, createdAt: share.createdAt, geometry: share.geometry },
+    stops: share.stops,
+  });
+});
+
+// POST /api/share/:token/stop/:id  Body: { status, reason?, clientTimestamp? }
+// Marks one stop delivered/failed/pending. Public for the same reason as
+// the GET above. Idempotent (replaying the same call is always safe) and
+// keeps both the device's own clock and the server's, so a later
+// reconciliation can tell which of two conflicting updates actually
+// happened first — see updateStopStatus()'s doc comment for exactly how.
+app.post("/api/share/:token/stop/:id", (req, res) => {
+  const { status, reason, clientTimestamp } = req.body || {};
+  const result = updateStopStatus(req.params.token, req.params.id, { status, reason, clientTimestamp });
+
+  if (result.error === "not_found") return res.status(404).json({ error: "link invalido ou expirado" });
+  if (result.error === "stop_not_found") return res.status(404).json({ error: "paragem nao encontrada" });
+  if (result.error === "invalid_status") return res.status(400).json({ error: "status tem de ser pending, delivered ou failed" });
+
+  res.json({ ...result.stop, applied: result.applied });
 });
 
 // -----------------------------------------------------------------------
@@ -425,14 +497,53 @@ if (APP_PASSWORD) {
 
 app.use(express.static(path.join(__dirname, "public")));
 
+// /manage/<kind> — the full-page editors behind the sidebar's "Gerir
+// todos" links (public/manage.html reads the kind from the URL). Behind
+// the same login as the rest of the interface, since the static block
+// above sits after the auth middleware.
+const MANAGE_KINDS = ["addresses", "aliases", "blocked", "delivery-times"];
+app.get("/manage/:kind", (req, res) => {
+  if (!MANAGE_KINDS.includes(req.params.kind)) return res.status(404).send("Not found");
+  res.sendFile(path.join(__dirname, "public", "manage.html"));
+});
+
 // -----------------------------------------------------------------------
-// GET /api/fuel-estimate
-// Automatically estimates fuel consumption and price: geolocates the
-// requester's IP (to figure out the country) and uses a table of average
-// prices per country, combined with an assumed delivery-van consumption.
-// Doesn't need any key — uses the free ip-api.com API.
+// GET /api/fuel-estimate?origin=<address or "lat,lng">
+// Fuel consumption + price per litre for the cost line in exports. Price
+// comes from the first of these that works (see src/fuel.js):
+//   live   — French station feed around `origin`, converted to FUEL_CURRENCY
+//   manual — the fallback price saved via PUT /api/fuel-settings
+//   table  — the static per-country guess below, chosen by the requester's
+//            IP country (free ip-api.com, no key)
+// `origin` is normally the route's start; it's resolved through the same
+// geocode cache the route itself already filled, so this adds no paid
+// lookups. Without it (page load, before any route) the live tier is
+// skipped and the answer is whichever fallback applies.
 // -----------------------------------------------------------------------
 app.get("/api/fuel-estimate", async (req, res) => {
+  const settings = fuel.readSettings();
+  const consumption = settings.consumption || DEFAULT_VAN_CONSUMPTION_L_PER_100KM;
+  const origin = typeof req.query.origin === "string" ? req.query.origin.trim() : "";
+
+  let live = null;
+  let liveError = null;
+  if (origin) {
+    try {
+      live = await fuel.liveEstimate(await resolveToCoords(origin));
+    } catch (err) {
+      liveError = err.message; // network/feed/FX trouble — fall through to the fallbacks
+    }
+  }
+  if (live) {
+    return res.json({ consumption, ...live, manualPrice: settings.manualPrice });
+  }
+  if (settings.manualPrice) {
+    return res.json({
+      consumption, price: settings.manualPrice, currency: FUEL_CURRENCY, source: "manual",
+      manualPrice: settings.manualPrice, liveError,
+    });
+  }
+
   const forwarded = req.headers["x-forwarded-for"];
   const rawIp = (forwarded ? forwarded.split(",")[0].trim() : null) || req.socket.remoteAddress || "";
   const ip = rawIp.replace("::ffff:", "");
@@ -458,14 +569,40 @@ app.get("/api/fuel-estimate", async (req, res) => {
     // the default price instead of blocking the response.
   }
 
-  const fuel = (countryCode && FUEL_PRICE_BY_COUNTRY[countryCode]) || DEFAULT_FUEL_PRICE;
+  const table = (countryCode && FUEL_PRICE_BY_COUNTRY[countryCode]) || DEFAULT_FUEL_PRICE;
 
   res.json({
-    consumption: DEFAULT_VAN_CONSUMPTION_L_PER_100KM,
-    price: fuel.price,
-    currency: fuel.currency,
+    consumption,
+    price: table.price,
+    currency: table.currency,
+    source: "table",
     countryCode: countryCode || null,
+    manualPrice: null,
+    liveError,
   });
+});
+
+// GET/PUT /api/fuel-settings — the manual fallback price (in FUEL_CURRENCY)
+// and the van's consumption. Either can be null to mean "use the default".
+app.get("/api/fuel-settings", (req, res) => {
+  res.json({ ...fuel.readSettings(), currency: FUEL_CURRENCY, defaultConsumption: DEFAULT_VAN_CONSUMPTION_L_PER_100KM });
+});
+
+app.put("/api/fuel-settings", (req, res) => {
+  const body = req.body || {};
+  const parse = (v) => {
+    if (v === null || v === undefined || v === "") return null;
+    const n = Number(v);
+    return Number.isFinite(n) && n > 0 ? n : NaN;
+  };
+  const manualPrice = parse(body.manualPrice);
+  const consumption = parse(body.consumption);
+  if (Number.isNaN(manualPrice) || Number.isNaN(consumption)) {
+    return res.status(400).json({ error: "manualPrice e consumption tem de ser numeros positivos (ou vazios)" });
+  }
+  const settings = { manualPrice, consumption };
+  fuel.writeSettings(settings);
+  res.json({ ...settings, currency: FUEL_CURRENCY, defaultConsumption: DEFAULT_VAN_CONSUMPTION_L_PER_100KM });
 });
 
 // -----------------------------------------------------------------------
@@ -564,6 +701,38 @@ function detectLanAddress() {
 // guess at all.
 const SHARE_HOST_OVERRIDE = (process.env.SHARE_HOST || "").trim() || null;
 
+// Resolves the public-facing URL for a /shared/:token link and renders
+// its QR code — shared by /api/share-export and /api/share/route below,
+// the two endpoints that mint such links. See detectLanAddress() and
+// SHARE_HOST_OVERRIDE above for exactly how `effectiveHost` is chosen.
+// Throws if QR generation itself fails; callers turn that into a 500.
+async function buildShareUrlAndQr(req, token) {
+  const hostHeader = req.get("host") || `localhost:${PORT}`;
+  const [hostname] = hostHeader.split(":");
+  let effectiveHost = hostHeader;
+  let usedLanFallback = false;
+  let lanFallbackFailed = false;
+  let usedManualOverride = false;
+
+  if (SHARE_HOST_OVERRIDE) {
+    effectiveHost = SHARE_HOST_OVERRIDE;
+    usedManualOverride = true;
+  } else if (hostname === "localhost" || hostname === "127.0.0.1") {
+    const hostPort = hostHeader.split(":")[1];
+    const lanIp = detectLanAddress();
+    if (lanIp) {
+      effectiveHost = hostPort ? `${lanIp}:${hostPort}` : lanIp;
+      usedLanFallback = true;
+    } else {
+      lanFallbackFailed = true;
+    }
+  }
+
+  const url = `${req.protocol}://${effectiveHost}/shared/${token}`;
+  const qrDataUrl = await QRCode.toDataURL(url, { margin: 1, width: 320 });
+  return { url, qrDataUrl, usedLanFallback, lanFallbackFailed, usedManualOverride };
+}
+
 // POST /api/share-export  Body: { filename, content, mime }
 // Creates a temporary (30 min) shareable link + QR code for a piece of
 // exported content — see the shareStore comment near the top of this
@@ -600,33 +769,8 @@ app.post("/api/share-export", async (req, res) => {
   }
   shareStore.set(token, entry);
 
-  // Priority: explicit SHARE_HOST override (always wins, no guessing) ->
-  // automatic localhost-to-LAN-IP swap -> whatever the browser sent, as-is.
-  const hostHeader = req.get("host") || `localhost:${PORT}`;
-  const [hostname] = hostHeader.split(":");
-  let effectiveHost = hostHeader;
-  let usedLanFallback = false;
-  let lanFallbackFailed = false;
-  let usedManualOverride = false;
-
-  if (SHARE_HOST_OVERRIDE) {
-    effectiveHost = SHARE_HOST_OVERRIDE;
-    usedManualOverride = true;
-  } else if (hostname === "localhost" || hostname === "127.0.0.1") {
-    const hostPort = hostHeader.split(":")[1];
-    const lanIp = detectLanAddress();
-    if (lanIp) {
-      effectiveHost = hostPort ? `${lanIp}:${hostPort}` : lanIp;
-      usedLanFallback = true;
-    } else {
-      lanFallbackFailed = true;
-    }
-  }
-
-  const url = `${req.protocol}://${effectiveHost}/shared/${token}`;
-
   try {
-    const qrDataUrl = await QRCode.toDataURL(url, { margin: 1, width: 320 });
+    const { url, qrDataUrl, usedLanFallback, lanFallbackFailed, usedManualOverride } = await buildShareUrlAndQr(req, token);
     res.json({
       url,
       qrDataUrl,
@@ -634,6 +778,62 @@ app.post("/api/share-export", async (req, res) => {
       usedLanFallback,
       lanFallbackFailed,
       usedManualOverride,
+    });
+  } catch (err) {
+    res.status(500).json({ error: "Falha ao gerar o codigo QR" });
+  }
+});
+
+// POST /api/share/route  Body: { addresses: string[], roundTrip?, deadlines?: (string|null)[] }
+// Creates a 24h shareable route for a driver's phone: same QR/link
+// mechanics as /api/share-export above, but carrying the full ordered
+// stop list (id, coords, deadline) so the receiving device can track
+// delivery progress via GET/POST /api/share/:token, and keep syncing it
+// back here even if it only reconnects hours later. `addresses` must
+// already be in the order to hand out — this endpoint never reorders
+// them, same as /api/route. Requires the normal app login (registered
+// after the auth middleware); the two endpoints the resulting link is
+// for do not, on purpose — see their own comments near GET /shared/:token.
+app.post("/api/share/route", async (req, res) => {
+  const { addresses, roundTrip, deadlines } = req.body || {};
+  if (!Array.isArray(addresses) || addresses.length === 0 || addresses.some((a) => typeof a !== "string" || !a.trim())) {
+    return res.status(400).json({ error: "addresses tem de ser uma lista de texto nao vazia" });
+  }
+  if (deadlines !== undefined && (!Array.isArray(deadlines) || deadlines.length !== addresses.length)) {
+    return res.status(400).json({ error: "deadlines, quando enviado, tem de ter o mesmo tamanho que addresses" });
+  }
+
+  const coords = await Promise.all(addresses.map((a) => resolveToCoords(a).catch(() => null)));
+
+  // Best-effort driving geometry for the driver's map screen — the same
+  // engine /api/route already uses, called plainly (no restriction
+  // exclusion here: that logic is significant and this polyline is a
+  // nice-to-have visual aid, not a routing guarantee). Missing Valhalla,
+  // fewer than 2 resolved points, or any Valhalla error just means no
+  // polyline; the share itself still succeeds.
+  let geometry = null;
+  if (VALHALLA_URL) {
+    try {
+      const route = await valhallaRoute(addresses);
+      geometry = route.geometry;
+    } catch (err) {
+      geometry = null;
+    }
+  }
+
+  const share = createRouteShare({ addresses, coords, deadlines, roundTrip, geometry });
+
+  try {
+    const { url, qrDataUrl, usedLanFallback, lanFallbackFailed, usedManualOverride } = await buildShareUrlAndQr(req, share.token);
+    res.json({
+      token: share.token,
+      url,
+      qrDataUrl,
+      expiresInMinutes: Math.round(ROUTE_SHARE_TTL_MS / 60000),
+      usedLanFallback,
+      lanFallbackFailed,
+      usedManualOverride,
+      unresolvedAddresses: addresses.filter((_, i) => !coords[i]),
     });
   } catch (err) {
     res.status(500).json({ error: "Falha ao gerar o codigo QR" });
@@ -1306,9 +1506,30 @@ async function rescueStrandedWithAccessManager(durations, addresses, points, exc
   return durations;
 }
 
+// Best-effort walking-mode matrix via Valhalla's pedestrian costing — the
+// safety net for a ROUTING_SOURCE=osrm setup with no reachable walking
+// OSRM instance (OSRM_URL_WALKING unset, or pointed at nothing). Without
+// this, overlayWalkingMatrix's own OSRM->Google chain (src/routing.js —
+// it can't reach Valhalla itself, see that file's comment on why) was
+// the ONLY path for a walk-only stop's distance, so a Google key that
+// isn't actually working — not unusual on a setup where OSRM does the
+// real routing and Google was never meant to be used — failed the WHOLE
+// optimize request, every time any stop was marked walk-only. Only
+// computed when actually needed (some stop IS walk-only) and only when
+// Valhalla is configured; any failure here just falls through to that
+// same OSRM->Google chain, exactly as before this existed.
+async function buildWalkingMatrixViaValhalla(addresses, restrictedFlags) {
+  if (!VALHALLA_URL || !restrictedFlags.some(Boolean)) return null;
+  try {
+    return await valhallaMatrix(addresses, { costing: "pedestrian" });
+  } catch (err) {
+    return null;
+  }
+}
+
 // POST /api/optimize
 app.post("/api/optimize", async (req, res) => {
-  const { addresses, mode, roundTrip, restricted, deadlines, startMinutes, stopMinutes } = req.body || {};
+  const { addresses, mode, roundTrip, restricted, deadlines, startMinutes, stopMinutes, lockedIndices } = req.body || {};
 
   if (!Array.isArray(addresses) || addresses.length < 3) {
     return res.status(400).json({ error: "sao precisos pelo menos 3 enderecos para otimizar" });
@@ -1329,6 +1550,17 @@ app.post("/api/optimize", async (req, res) => {
   const deadlineArr = Array.isArray(deadlines) && deadlines.length === addresses.length ? deadlines : null;
   const startMin = typeof startMinutes === "number" ? startMinutes : null;
   const stopMin = typeof stopMinutes === "number" ? stopMinutes : 0;
+  // Stops the interface's drag/edit-position feature already moved to a
+  // specific spot — see optimizeOrder's own doc comment for why a lock
+  // is always self-referential ("index i stays at position i"), never an
+  // arbitrary remap: the client reorders `addresses` itself before
+  // sending it here, so the index a manually placed stop sits at IS the
+  // position it's locked to. Malformed entries are dropped rather than
+  // rejected outright — one bad index from a stale client shouldn't fail
+  // the whole optimize call.
+  const lockedIndicesArr = Array.isArray(lockedIndices)
+    ? lockedIndices.filter((i) => Number.isInteger(i) && i >= 0 && i < addresses.length)
+    : [];
 
   try {
     // A road restriction saved earlier (e.g. via the map, on a previous
@@ -1340,6 +1572,7 @@ app.post("/api/optimize", async (req, res) => {
     // pairs around an excluded segment, so active restrictions switch the
     // matrix source for this request; with none active, nothing changes.
     const activeRestrictions = listActiveRestrictions();
+    const walkingMatrixOverride = await buildWalkingMatrixViaValhalla(addresses, restrictedFlags);
     let durations;
     if (activeRestrictions.length > 0 && VALHALLA_URL) {
       const points = await resolveAddressPoints(addresses);
@@ -1354,7 +1587,7 @@ app.post("/api/optimize", async (req, res) => {
         // branch skips entirely. That's exactly the case where it matters
         // most: the van can't reach the stop by road (correctly excluded),
         // but on foot it's perfectly reachable.
-        durations = await overlayWalkingMatrix(durations, addresses, restrictedFlags);
+        durations = await overlayWalkingMatrix(durations, addresses, restrictedFlags, walkingMatrixOverride);
         // Same reasoning as the map/preview side (see server.js's
         // /api/road-exclusion/preview comment): a stop this exclusion
         // leaves with no way in/out at all gets one real rescue attempt
@@ -1362,12 +1595,14 @@ app.post("/api/optimize", async (req, res) => {
         // flat-out impossible.
         durations = await rescueStrandedWithAccessManager(durations, addresses, points, polygons, roundTrip);
       } else {
-        durations = await buildMixedDurationMatrix(addresses, mode || "driving", restrictedFlags);
+        durations = await buildMixedDurationMatrix(addresses, mode || "driving", restrictedFlags, walkingMatrixOverride);
       }
     } else {
-      durations = await buildMixedDurationMatrix(addresses, mode || "driving", restrictedFlags);
+      durations = await buildMixedDurationMatrix(addresses, mode || "driving", restrictedFlags, walkingMatrixOverride);
     }
-    const order = optimizeOrder(durations, !!roundTrip, { deadlines: deadlineArr, startMinutes: startMin, stopMinutes: stopMin });
+    const order = optimizeOrder(durations, !!roundTrip, {
+      deadlines: deadlineArr, startMinutes: startMin, stopMinutes: stopMin, lockedIndices: lockedIndicesArr,
+    });
     const lateStops = computeLatenessReport(order, durations, deadlineArr, startMin, stopMin);
 
     // What the reorder actually bought, measured on the matrix the
@@ -1630,14 +1865,27 @@ app.post("/api/road-exclusion/preview", async (req, res) => {
     // The whole-trip call throws if ANY leg has no route at all, which
     // would hide a perfectly good route behind the one sealed-off stop —
     // route leg by leg instead so only that stretch comes back flagged.
-    // Keyed on isImpossible, not on the (possibly now-empty) `unreachable`
-    // list: a stop the Access Manager just rescued above still has no
-    // DIRECT route between its neighbours, so the plain whole-trip call
-    // would throw on it all the same — it needs the same leg-by-leg,
-    // access-aware path to actually draw.
-    const newRoute = isImpossible
-      ? await valhallaRouteAllowingGaps(reorderedAddresses, { excludePolygons: allExcludePolygons })
-      : await valhallaRoute(reorderedAddresses, { excludePolygons: allExcludePolygons });
+    // Keyed on isImpossible as an optimization (skip a call we already
+    // know will fail), NOT as the only trigger: `matrix` was already
+    // patched in place by rescueStrandedWithAccessManager above, so a
+    // pair it rescued via an alternate access point reads as perfectly
+    // finite here even though the plain whole-trip call below only ever
+    // tries the stops' own geocoded points — it knows nothing about that
+    // access point, and fails on the exact same pair all over again. That
+    // mismatch used to surface as a raw "No path could be found for
+    // input" straight from Valhalla, dead-ending the preview before the
+    // unreachable-stop / "Marcar ponto de acesso" flow below ever ran —
+    // so any ValhallaNoRouteError here, not just the isImpossible case,
+    // falls back to the same leg-by-leg, access-aware call.
+    let newRoute;
+    try {
+      newRoute = isImpossible
+        ? await valhallaRouteAllowingGaps(reorderedAddresses, { excludePolygons: allExcludePolygons })
+        : await valhallaRoute(reorderedAddresses, { excludePolygons: allExcludePolygons });
+    } catch (routeErr) {
+      if (!(routeErr instanceof ValhallaNoRouteError) || isImpossible) throw routeErr;
+      newRoute = await valhallaRouteAllowingGaps(reorderedAddresses, { excludePolygons: allExcludePolygons });
+    }
 
     // Ground truth for "does the driver need to hand-pick an access
     // point for this stop": a real gap left in newRoute above — Access

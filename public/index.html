@@ -70,13 +70,13 @@
   <!-- SIDEBAR -->
   <div class="sidebar">
 
-    <div>
+    <div class="sidebar-section">
       <div class="block-label"><span class="num">01</span> <span data-i18n="startEndLabel">Ponto de partida e chegada</span></div>
       <label class="field-label" for="startEndAddress" data-i18n="startEndSublabel">Opcional — se preenchido, é usado automaticamente como primeira e última paragem (viagem de ida e volta)</label>
       <input type="text" id="startEndAddress" data-i18n-placeholder="startEndPlaceholder" placeholder="Armazém Central, Riddes" />
     </div>
 
-    <div>
+    <div class="sidebar-section">
       <div class="block-label"><span class="num">02</span> <span data-i18n="section1Label">Endereços</span></div>
       <label class="field-label" for="addressList" data-i18n="section1Sublabel">Um endereço por linha, na ordem de visita</label>
       <textarea id="addressList" data-i18n-placeholder="addressPlaceholder" placeholder="Rua Augusta 1, Lisboa
@@ -89,18 +89,10 @@ Torre de Belém, Lisboa"></textarea>
         <button class="btn-ghost" id="clearAddressesBtn" style="flex:1; font-size:12px;" data-i18n="clearAddressesBtn">🗑 Limpar</button>
         <button class="btn-ghost" id="sendToVerifyBtn" style="flex:1; font-size:12px;" data-i18n="sendToVerifyBtn">↗ Corrigir Endereços</button>
       </div>
-      <div style="display:flex; gap:8px;">
-        <select id="addressExportFormat" style="flex:0 0 auto;">
-          <option value="csv">CSV</option>
-          <option value="txt">TXT</option>
-          <option value="json">JSON</option>
-        </select>
-        <button class="btn-ghost" id="exportAddressesBtn" style="flex:1; font-size:12px;" data-i18n="exportAddressesBtn">⬇ Exportar endereços</button>
-        <button class="btn-share-qr" id="exportAddressesQrBtn" data-i18n-title="qrShareBtnTitle" title="Partilhar por QR code">📱</button>
-      </div>
+      <a class="btn-ghost manage-link" id="addressesManageLink" href="/manage/addresses" target="_blank" rel="noopener"><span data-i18n="manageAllBtn">Gerir todos</span> <span class="list-count" id="addressCount"></span> ↗</a>
     </div>
 
-    <div>
+    <div class="sidebar-section">
       <div class="block-label"><span class="num">03</span> <span data-i18n="section2Label">Aliases de coordenadas</span></div>
       <div class="hint" id="section2Hint" style="margin-top:0; margin-bottom:10px;">Se um endereço não for reconhecido, define aqui o texto exato tal como aparece na lista, e a coordenada GPS a usar em vez dele (formato: <span class="mono">latitude,longitude</span>). Ficam guardados no servidor, sobrevivem a recarregar a página.</div>
       <label class="field-label" for="aliasPicker" data-i18n="aliasPickerLabel">Escolher endereço da lista (evita erros de digitação)</label>
@@ -112,14 +104,11 @@ Torre de Belém, Lisboa"></textarea>
         <input type="text" id="aliasTo" data-i18n-placeholder="aliasToPlaceholder" placeholder="38.7223,-9.1393 ou Rua Nova, Cidade" />
         <button class="btn-ghost" id="addAliasBtn">+</button>
       </div>
-      <div class="list-search-row">
-        <input type="text" id="aliasSearch" data-i18n-placeholder="searchPlaceholder" placeholder="Pesquisar…" />
-        <span class="list-count" id="aliasCount"></span>
-      </div>
-      <div id="aliasList" class="scroll-list"></div>
+      <div id="aliasList" class="scroll-list recent-list"></div>
+      <a class="btn-ghost manage-link" id="aliasesManageLink" href="/manage/aliases" target="_blank" rel="noopener"><span data-i18n="manageAllBtn">Gerir todos</span> <span class="list-count" id="aliasCount"></span> ↗</a>
     </div>
 
-    <div>
+    <div class="sidebar-section">
       <div class="block-label"><span class="num">04</span> <span data-i18n="section4Label">Endereços interditos</span></div>
       <div class="hint" id="section4Hint" style="margin-top:0; margin-bottom:10px;">Endereços onde a entrega é feita a pé (rua estreita, telhado, terra batida, acesso interdito à carrinha). Ficam guardados no servidor, e os troços que os envolvem são calculados automaticamente a pé em vez de de carro.</div>
       <label class="field-label" for="blockedPicker" data-i18n="blockedPickerLabel">Escolher endereço da lista</label>
@@ -134,14 +123,11 @@ Torre de Belém, Lisboa"></textarea>
       <label class="field-label" for="blockedParking" data-i18n="blockedParkingLabel" style="margin-top:2px;">Ponto de estacionamento (opcional)</label>
       <input type="text" id="blockedParking" data-i18n-placeholder="blockedParkingPlaceholder" placeholder="46.1706,7.4453 ou Rua do Parque, Cidade" style="margin-bottom:10px;" />
       <div class="hint" data-i18n="blockedParkingHint" style="margin-top:-4px; margin-bottom:10px;">Se souberes onde a carrinha consegue estacionar perto deste endereço, o troço divide-se automaticamente em carro até lá + a pé até à porta. Sem isto, o troço inteiro é calculado a pé.</div>
-      <div class="list-search-row">
-        <input type="text" id="blockedSearch" data-i18n-placeholder="searchPlaceholder" placeholder="Pesquisar…" />
-        <span class="list-count" id="blockedCount"></span>
-      </div>
-      <div id="blockedList" class="scroll-list"></div>
+      <div id="blockedList" class="scroll-list recent-list"></div>
+      <a class="btn-ghost manage-link" id="blockedManageLink" href="/manage/blocked" target="_blank" rel="noopener"><span data-i18n="manageAllBtn">Gerir todos</span> <span class="list-count" id="blockedCount"></span> ↗</a>
     </div>
 
-    <div>
+    <div class="sidebar-section">
       <div class="block-label"><span class="num">05</span> <span data-i18n="deliveryTimesLabel">Horas de entrega</span></div>
       <div class="hint" id="deliveryTimesHint" style="margin-top:0; margin-bottom:10px;">Para clientes habituais com uma hora limite fixa, define aqui o endereço e a hora (ex: até às 10:00). Fica guardado no servidor e aplica-se sempre que esse endereço aparecer numa rota — sem teres de escrever "| HH:MM" na lista todas as vezes. Uma hora escrita diretamente na lista de endereços (secção 02) tem sempre prioridade sobre isto.</div>
       <label class="field-label" for="deliveryTimePicker" data-i18n="deliveryTimePickerLabel">Escolher endereço da lista</label>
@@ -153,14 +139,11 @@ Torre de Belém, Lisboa"></textarea>
         <input type="time" id="deliveryTimeValue" />
         <button class="btn-ghost" id="addDeliveryTimeBtn">+</button>
       </div>
-      <div class="list-search-row">
-        <input type="text" id="deliveryTimeSearch" data-i18n-placeholder="searchPlaceholder" placeholder="Pesquisar…" />
-        <span class="list-count" id="deliveryTimeCount"></span>
-      </div>
-      <div id="deliveryTimeList" class="scroll-list"></div>
+      <div id="deliveryTimeList" class="scroll-list recent-list"></div>
+      <a class="btn-ghost manage-link" id="delivery-timesManageLink" href="/manage/delivery-times" target="_blank" rel="noopener"><span data-i18n="manageAllBtn">Gerir todos</span> <span class="list-count" id="deliveryTimeCount"></span> ↗</a>
     </div>
 
-    <div>
+    <div class="sidebar-section">
       <div class="block-label"><span class="num">06</span> <span data-i18n="section3Label">Horário</span></div>
       <div class="row2">
         <div>
@@ -182,12 +165,30 @@ Torre de Belém, Lisboa"></textarea>
     <button class="btn-primary" id="calcBtn" data-i18n="calcBtnText">Calcular rota</button>
     <div id="statusArea"></div>
 
-    <div style="margin-top:26px;">
+    <div class="sidebar-section" style="margin-top:26px;">
       <div class="block-label"><span class="num">07</span> <span data-i18n="cacheLabel">Dados guardados</span></div>
       <div class="hint" id="cacheHint" style="margin-top:0; margin-bottom:10px;">As distâncias já calculadas ficam guardadas para não pagares duas vezes pelo mesmo troço. Se souberes que uma estrada mudou (obras que acabaram, sentido alterado), limpa aqui para forçar valores novos.</div>
       <div id="cacheStatsArea" class="cache-stats"></div>
       <button class="btn-ghost" id="clearDistanceCacheBtn" style="width:100%; font-size:12px; margin-top:8px;" data-i18n="clearDistanceCacheBtn">🗑 Limpar distâncias guardadas</button>
       <div id="cacheStatusArea"></div>
+    </div>
+
+    <div class="sidebar-section" style="margin-top:26px;">
+      <div class="block-label"><span class="num">08</span> <span data-i18n="fuelLabel">Combustível</span></div>
+      <div class="hint" data-i18n="fuelHint" style="margin-top:0; margin-bottom:10px;">O preço do gasóleo vem, em tempo real, da média das estações francesas mais próximas do ponto de partida da rota (dados oficiais, convertidos à taxa do BCE). Se não houver ligação ou nenhuma estação ao alcance, usa-se o preço manual abaixo.</div>
+      <div id="fuelCurrentArea" class="cache-stats"></div>
+      <div class="row2" style="margin-top:10px;">
+        <div>
+          <label class="field-label" for="fuelManualPrice"><span data-i18n="fuelManualPriceLabel">Preço manual (fallback)</span> <span id="fuelCurrencyLabel"></span>/L</label>
+          <input type="number" id="fuelManualPrice" min="0" step="0.01" placeholder="1.95" />
+        </div>
+        <div>
+          <label class="field-label" for="fuelConsumption" data-i18n="fuelConsumptionLabel">Consumo (L/100 km)</label>
+          <input type="number" id="fuelConsumption" min="0" step="0.1" placeholder="11" />
+        </div>
+      </div>
+      <button class="btn-ghost" id="saveFuelSettingsBtn" style="width:100%; font-size:12px; margin-top:8px;" data-i18n="fuelSaveBtn">Guardar</button>
+      <div id="fuelStatusArea"></div>
     </div>
   </div>
 
@@ -209,8 +210,11 @@ Torre de Belém, Lisboa"></textarea>
           <div id="mapToolbar" class="map-toolbar" style="display:none;">
             <button class="map-tool-btn active" id="mapToolSelect" type="button" data-i18n="mapToolSelect">✋ Selecionar</button>
             <button class="map-tool-btn" id="mapToolExclude" type="button" data-i18n="mapToolExclude">🚧 Bloquear via</button>
+            <button class="map-tool-btn" id="mapToolGroupWalk" type="button" data-i18n-title="groupWalkBtnTitle" title="Agrupar endereços onde a carrinha não entra" data-i18n="groupWalkBtn">✏️ Agrupar (a pé)</button>
             <button class="map-tool-btn" id="mapToolAnimate" type="button" data-i18n="mapToolAnimate">▶️ Animar rota</button>
             <button class="map-tool-btn" id="mapToolRecenter" type="button" title="Centrar no mapa a rota inteira" data-i18n="mapToolRecenter">🎯 Centrar rota</button>
+            <button class="map-tool-btn" id="mapToolShareDriver" type="button" data-i18n-title="shareRouteBtnTitle" title="Partilhar rota com o condutor (app de entregas)" data-i18n="shareRouteBtn">📱 Partilhar com condutor</button>
+            <button class="map-tool-btn" id="mapToolFullscreen" type="button" data-i18n-title="mapFullscreenTitle" title="Mapa em ecrã inteiro (Esc para sair)" data-i18n="mapFullscreen">⛶ Ecrã inteiro</button>
             <div id="pinStyleGroup" style="display:none;gap:8px;">
               <button class="map-tool-btn" id="pinStyleClassic" type="button" data-pin-style="classic" data-i18n="pinStyleClassic">Clássico</button>
               <button class="map-tool-btn" id="pinStyleModern" type="button" data-pin-style="modern" data-i18n="pinStyleModern">Moderno</button>
@@ -238,6 +242,16 @@ Torre de Belém, Lisboa"></textarea>
           <div id="activeRestrictionsSection" style="display:none;">
             <label class="field-label" style="margin-top:16px;" data-i18n="activeRestrictionsLabel">Troços excluídos ativos</label>
             <div id="activeRestrictionsList"></div>
+          </div>
+          <div id="walkOnlySection" style="display:none;">
+            <div class="field-label-row" style="margin-top:16px;">
+              <label class="field-label" data-i18n="walkOnlyActiveLabel">Endereços a pé</label>
+              <label class="walk-only-master-toggle" data-i18n-title="walkOnlyEnableAllTitle" title="Ativar/desativar todos os endereços &quot;a pé&quot; da rota atual, sem apagar a lista">
+                <input type="checkbox" id="walkOnlyEnabledToggle" checked>
+                <span data-i18n="walkOnlyEnableAllLabel">Ativos</span>
+              </label>
+            </div>
+            <div id="walkOnlyList"></div>
           </div>
         </div>
       </div>
@@ -316,7 +330,7 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
 </div>
 
 <footer class="app-footer">
-  <p data-i18n="footerDisclaimer">Criado por André Soares com a ajuda de Claude (Anthropic). Pode conter erros. Verifica sempre a informação antes de a usares. Dados de mapas e cálculos de rota © Google.</p>
+  <p data-i18n="footerDisclaimer">Criado por André Soares com a ajuda de Claude (Anthropic). Pode conter erros. Verifica sempre a informação antes de a usares. Dados de mapas e cálculos de rota © Google, Osrm Routing, Swisstopo and valhalla Routing Engine.</p>
 </footer>
 
 <div class="qr-modal-overlay" id="qrModalOverlay">
@@ -384,6 +398,19 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
   const aliases = []; // {from, to: "lat,lng"}
   let lastRouteData = null; // data from the last calculated route, used for export
 
+  // Manual stop reordering (drag or type a new number on a marker in the
+  // "→ ROUTE" panel): a pinned address is sent to /api/optimize as a
+  // lockedIndices entry, so the next "Reorganizar rota" keeps it exactly
+  // where it was placed and only reorders everything else around it. Kept
+  // by address TEXT (same convention as aliases/deadlines/blocked
+  // addresses elsewhere in this app), not by array position, so a pin
+  // survives lines being added/removed elsewhere in the list.
+  let pinnedAddresses = new Set();
+  // One level of undo for the manual drag/edit itself (not a general undo
+  // stack) — snapshot taken right before each move, restorable with
+  // "↺ Repor ordem" until the next move overwrites it.
+  let preManualEditSnapshot = null;
+
   const $ = (id) => document.getElementById(id);
 
   async function fetchAliases(){
@@ -420,45 +447,38 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
   }
 
   // ---------- Aliases ----------
-  let aliasFilterText = '';
+  // Sidebar shows only the newest entries; the full list, with search and
+  // in-place editing, lives on its own page (public/manage.html) behind
+  // the "Gerir todos" link. `createdAt` is what the server stamps on
+  // every save, so "newest" is by that, not by position in the file.
+  const SIDEBAR_RECENT_COUNT = 3;
+  function mostRecent(list){
+    return list.slice().sort((a, b)=> String(b.createdAt || '').localeCompare(String(a.createdAt || ''))).slice(0, SIDEBAR_RECENT_COUNT);
+  }
+  function setManageCount(countId, n){
+    $(countId).textContent = n > 0 ? `(${n})` : '';
+  }
 
   function renderAliases(){
     const box = $('aliasList');
     box.innerHTML = '';
-
-    const filtered = aliasFilterText
-      ? aliases.filter(a => normalizeForMatch(a.from).includes(aliasFilterText) || normalizeForMatch(a.to).includes(aliasFilterText))
-      : aliases;
-
-    $('aliasCount').textContent = aliasFilterText
-      ? `${filtered.length} / ${aliases.length}`
-      : (aliases.length > 0 ? `${aliases.length}` : '');
-
-    if(aliases.length === 0){
-      box.innerHTML = '';
-    } else if(filtered.length === 0){
-      box.innerHTML = `<div class="list-empty">${t('noResults')}</div>`;
-    } else {
-      filtered.forEach((a, i) => {
-        const idx = aliases.indexOf(a); // real index, to remove correctly even when filtered
-        const row = document.createElement('div');
-        row.className = 'alias-list-item numbered';
-        row.innerHTML = `
-          <span class="num">${i + 1}</span>
-          <div>
-            <div class="from">${escapeHtml(a.from)}</div>
-            <div class="to">→ ${escapeHtml(a.to)}</div>
-          </div>
-          <button class="alias-remove" data-idx="${idx}" title="${t('aliasRemoveTitle')}">✕</button>
-        `;
-        box.appendChild(row);
-      });
-    }
+    setManageCount('aliasCount', aliases.length);
+    mostRecent(aliases).forEach((a) => {
+      const row = document.createElement('div');
+      row.className = 'alias-list-item';
+      row.innerHTML = `
+        <div>
+          <div class="from">${escapeHtml(a.from)}</div>
+          <div class="to">→ ${escapeHtml(a.to)}</div>
+        </div>
+        <button class="alias-remove" data-from="${escapeHtml(a.from)}" title="${t('aliasRemoveTitle')}">✕</button>
+      `;
+      box.appendChild(row);
+    });
 
     box.querySelectorAll('.alias-remove').forEach(btn=>{
       btn.addEventListener('click', async (e)=>{
-        const i = parseInt(e.currentTarget.getAttribute('data-idx'),10);
-        const from = aliases[i].from;
+        const from = e.currentTarget.getAttribute('data-from');
         try{
           const updated = await deleteAliasFromServer(from);
           aliases.length = 0;
@@ -471,34 +491,42 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
     });
   }
 
-  $('aliasSearch').addEventListener('input', (e)=>{
-    aliasFilterText = normalizeForMatch(e.target.value);
-    renderAliases();
-  });
-
   function escapeHtml(s){
     return s.replace(/[&<>"']/g, c => ({'&':'&amp;','<':'&lt;','>':'&gt;','"':'&quot;',"'":'&#39;'}[c]));
   }
 
   // ---------- Alias address picker ----------
-  // Shared by refreshAliasPicker/refreshBlockedPicker/refreshDeliveryTimePicker
-  // — same "pick an address already in the list" dropdown, just filling a
-  // different target field each time. Options are labelled with the
-  // stop's position (matching the numbering everywhere else addresses are
-  // listed); the value stays the plain address string.
+  // The option's VALUE is the line's position (index), never the address
+  // text itself — two identical addresses at different positions (a
+  // building visited twice, a duplicate line) are otherwise indistinguishable
+  // once picked: a <select> always resolves a given value to its FIRST
+  // matching <option>, so choosing "3. Rua X" when "1. Rua X" also exists
+  // would silently jump back to showing "1." the next time anything
+  // refreshes the list — the picker LOOKED like it forgot which one you chose.
   function addressPickerOptionsHtml(addrs){
-    return addrs.map((a,i) => `<option value="${escapeHtml(a)}">${i+1}. ${escapeHtml(a)}</option>`).join('');
+    return addrs.map((a,i) => `<option value="${i}">${i+1}. ${escapeHtml(a)}</option>`).join('');
+  }
+
+  // Shared by every "Escolher endereço da lista" picker (aliases, blocked,
+  // delivery times) — the exact same address lines buildTextAddresses()
+  // itself starts from, before deadline-suffix parsing.
+  function getAddressLines(){
+    return $('addressList').value
+      .split(/\r?\n/)
+      .map(l=>l.trim())
+      .filter(l=>l.length>0 && !l.startsWith('#'));
   }
 
   function refreshAliasPicker(){
     const picker = $('aliasPicker');
     const current = picker.value;
-    const addrs = $('addressList').value
-      .split(/\r?\n/)
-      .map(l=>l.trim())
-      .filter(l=>l.length>0 && !l.startsWith('#'));
+    const addrs = getAddressLines();
+    $('addressCount').textContent = addrs.length > 0 ? `(${addrs.length})` : '';
     picker.innerHTML = `<option value="">${t('aliasPickerDefault')}</option>` + addressPickerOptionsHtml(addrs);
-    if(addrs.includes(current)) picker.value = current;
+    // Keeping the same POSITION selected (not re-matching by text) is what
+    // actually preserves "the 3rd line", even when duplicate addresses
+    // exist elsewhere in the list.
+    if(current !== '' && Number(current) < addrs.length) picker.value = current;
   }
   $('addressList').addEventListener('focus', refreshAliasPicker);
   $('addressList').addEventListener('input', refreshAliasPicker);
@@ -508,7 +536,34 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
   $('addressList').addEventListener('input', refreshDeliveryTimePicker);
   $('aliasPicker').addEventListener('focus', refreshAliasPicker);
   $('aliasPicker').addEventListener('change', (e)=>{
-    if(e.target.value) $('aliasFrom').value = e.target.value;
+    const address = getAddressLines()[parseInt(e.target.value, 10)];
+    if(address != null) $('aliasFrom').value = address;
+  });
+
+  function refreshBlockedPicker(){
+    const picker = $('blockedPicker');
+    const current = picker.value;
+    const addrs = getAddressLines();
+    picker.innerHTML = `<option value="">${t('aliasPickerDefault')}</option>` + addressPickerOptionsHtml(addrs);
+    if(current !== '' && Number(current) < addrs.length) picker.value = current;
+  }
+  $('blockedPicker').addEventListener('focus', refreshBlockedPicker);
+  $('blockedPicker').addEventListener('change', (e)=>{
+    const address = getAddressLines()[parseInt(e.target.value, 10)];
+    if(address != null) $('blockedAddress').value = address;
+  });
+
+  function refreshDeliveryTimePicker(){
+    const picker = $('deliveryTimePicker');
+    const current = picker.value;
+    const addrs = getAddressLines();
+    picker.innerHTML = `<option value="">${t('aliasPickerDefault')}</option>` + addressPickerOptionsHtml(addrs);
+    if(current !== '' && Number(current) < addrs.length) picker.value = current;
+  }
+  $('deliveryTimePicker').addEventListener('focus', refreshDeliveryTimePicker);
+  $('deliveryTimePicker').addEventListener('change', (e)=>{
+    const address = getAddressLines()[parseInt(e.target.value, 10)];
+    if(address != null) $('deliveryTimeAddress').value = address;
   });
 
   $('addAliasBtn').addEventListener('click', async ()=>{
@@ -581,6 +636,14 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
 
   const blocked = []; // {address, reason}
 
+  // Mirrors map.js's own copy of this same switch (next to the "Endereços
+  // a pé" label) — kept in sync via onWalkOnlyEnabledChanged below. Off
+  // means findBlockedMatch() stops matching anything, so routing treats
+  // every address as normal without deleting a single entry from
+  // data/blocked.json.
+  let walkOnlyEnabled = true;
+  try { walkOnlyEnabled = localStorage.getItem('walkOnlyEnabled') !== '0'; } catch(err){ /* localStorage indisponível */ }
+
   async function fetchBlocked(){
     try{
       const res = await fetch('/api/blocked');
@@ -615,80 +678,39 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
   }
 
   // ---------- Blocked addresses ----------
-  let blockedFilterText = '';
-
   function renderBlocked(){
     const box = $('blockedList');
     box.innerHTML = '';
-
-    const filtered = blockedFilterText
-      ? blocked.filter(b =>
-          normalizeForMatch(b.address).includes(blockedFilterText) ||
-          normalizeForMatch(b.reason || '').includes(blockedFilterText)
-        )
-      : blocked;
-
-    $('blockedCount').textContent = blockedFilterText
-      ? `${filtered.length} / ${blocked.length}`
-      : (blocked.length > 0 ? `${blocked.length}` : '');
-
-    if(blocked.length === 0){
-      box.innerHTML = '';
-    } else if(filtered.length === 0){
-      box.innerHTML = `<div class="list-empty">${t('noResults')}</div>`;
-    } else {
-      filtered.forEach((b, i) => {
-        const idx = blocked.indexOf(b); // real index, to remove correctly even when filtered
-        const row = document.createElement('div');
-        row.className = 'alias-list-item numbered';
-        row.innerHTML = `
-          <span class="num">${i + 1}</span>
-          <div>
-            <div class="from">🚫 ${escapeHtml(b.address)}</div>
-            ${b.reason ? `<div class="to">${escapeHtml(b.reason)}</div>` : ''}
-            ${b.parkingPoint ? `<div class="to">🅿️ ${escapeHtml(b.parkingPoint)}</div>` : ''}
-          </div>
-          <button class="alias-remove" data-idx="${idx}" title="${t('aliasRemoveTitle')}">✕</button>
-        `;
-        box.appendChild(row);
-      });
-    }
+    setManageCount('blockedCount', blocked.length);
+    mostRecent(blocked).forEach((b) => {
+      const row = document.createElement('div');
+      row.className = 'alias-list-item';
+      row.innerHTML = `
+        <div>
+          <div class="from">🚫 ${escapeHtml(b.address)}</div>
+          ${b.reason ? `<div class="to">${escapeHtml(b.reason)}</div>` : ''}
+          ${b.parkingPoint ? `<div class="to">🅿️ ${escapeHtml(b.parkingPoint)}</div>` : ''}
+        </div>
+        <button class="alias-remove" data-address="${escapeHtml(b.address)}" title="${t('aliasRemoveTitle')}">✕</button>
+      `;
+      box.appendChild(row);
+    });
 
     box.querySelectorAll('.alias-remove').forEach(btn=>{
       btn.addEventListener('click', async (e)=>{
-        const i = parseInt(e.currentTarget.getAttribute('data-idx'),10);
-        const address = blocked[i].address;
+        const address = e.currentTarget.getAttribute('data-address');
         try{
           const updated = await deleteBlockedFromServer(address);
           blocked.length = 0;
           updated.forEach(b=>blocked.push(b));
           renderBlocked();
+          await runCalculate(true, true);
         } catch(err){
           showStatus(t('blockedRemoveError', {msg: err.message}), 'error');
         }
       });
     });
   }
-
-  $('blockedSearch').addEventListener('input', (e)=>{
-    blockedFilterText = normalizeForMatch(e.target.value);
-    renderBlocked();
-  });
-
-  function refreshBlockedPicker(){
-    const picker = $('blockedPicker');
-    const current = picker.value;
-    const addrs = $('addressList').value
-      .split(/\r?\n/)
-      .map(l=>l.trim())
-      .filter(l=>l.length>0 && !l.startsWith('#'));
-    picker.innerHTML = `<option value="">${t('aliasPickerDefault')}</option>` + addressPickerOptionsHtml(addrs);
-    if(addrs.includes(current)) picker.value = current;
-  }
-  $('blockedPicker').addEventListener('focus', refreshBlockedPicker);
-  $('blockedPicker').addEventListener('change', (e)=>{
-    if(e.target.value) $('blockedAddress').value = e.target.value;
-  });
 
   $('addBlockedBtn').addEventListener('click', async ()=>{
     const address = $('blockedAddress').value.trim();
@@ -705,53 +727,36 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
       $('blockedParking').value = '';
       renderBlocked();
       showStatus(t('blockedSaved'), 'ok');
+      // Without this, the "🚶"/blue marking only ever showed up after the
+      // driver separately clicked "Calcular rota" again — from here it
+      // looked like marking an address walk-only simply did nothing.
+      await runCalculate(true, true);
     } catch(err){
       showStatus(t('blockedSaveError', {msg: err.message}), 'error');
     }
   });
 
   // ---------- Delivery deadlines ----------
-  let deliveryTimeFilterText = '';
-
   function renderDeliveryTimes(){
     const box = $('deliveryTimeList');
     box.innerHTML = '';
-
-    const filtered = deliveryTimeFilterText
-      ? deliveryTimes.filter(d =>
-          normalizeForMatch(d.address).includes(deliveryTimeFilterText) ||
-          normalizeForMatch(d.deadline).includes(deliveryTimeFilterText)
-        )
-      : deliveryTimes;
-
-    $('deliveryTimeCount').textContent = deliveryTimeFilterText
-      ? `${filtered.length} / ${deliveryTimes.length}`
-      : (deliveryTimes.length > 0 ? `${deliveryTimes.length}` : '');
-
-    if(deliveryTimes.length === 0){
-      box.innerHTML = '';
-    } else if(filtered.length === 0){
-      box.innerHTML = `<div class="list-empty">${t('noResults')}</div>`;
-    } else {
-      filtered.forEach((d) => {
-        const idx = deliveryTimes.indexOf(d); // real index, to remove correctly even when filtered
-        const row = document.createElement('div');
-        row.className = 'alias-list-item';
-        row.innerHTML = `
-          <div>
-            <div class="from">${escapeHtml(d.address)}</div>
-            <div class="to">🎯 ${escapeHtml(d.deadline)}</div>
-          </div>
-          <button class="alias-remove" data-idx="${idx}" title="${t('aliasRemoveTitle')}">✕</button>
-        `;
-        box.appendChild(row);
-      });
-    }
+    setManageCount('deliveryTimeCount', deliveryTimes.length);
+    mostRecent(deliveryTimes).forEach((d) => {
+      const row = document.createElement('div');
+      row.className = 'alias-list-item';
+      row.innerHTML = `
+        <div>
+          <div class="from">${escapeHtml(d.address)}</div>
+          <div class="to">🎯 ${escapeHtml(d.deadline)}</div>
+        </div>
+        <button class="alias-remove" data-address="${escapeHtml(d.address)}" title="${t('aliasRemoveTitle')}">✕</button>
+      `;
+      box.appendChild(row);
+    });
 
     box.querySelectorAll('.alias-remove').forEach(btn=>{
       btn.addEventListener('click', async (e)=>{
-        const i = parseInt(e.currentTarget.getAttribute('data-idx'),10);
-        const address = deliveryTimes[i].address;
+        const address = e.currentTarget.getAttribute('data-address');
         try{
           const updated = await deleteDeliveryTimeFromServer(address);
           deliveryTimes.length = 0;
@@ -763,26 +768,6 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
       });
     });
   }
-
-  $('deliveryTimeSearch').addEventListener('input', (e)=>{
-    deliveryTimeFilterText = normalizeForMatch(e.target.value);
-    renderDeliveryTimes();
-  });
-
-  function refreshDeliveryTimePicker(){
-    const picker = $('deliveryTimePicker');
-    const current = picker.value;
-    const addrs = $('addressList').value
-      .split(/\r?\n/)
-      .map(l=>l.trim())
-      .filter(l=>l.length>0 && !l.startsWith('#'));
-    picker.innerHTML = `<option value="">${t('aliasPickerDefault')}</option>` + addressPickerOptionsHtml(addrs);
-    if(addrs.includes(current)) picker.value = current;
-  }
-  $('deliveryTimePicker').addEventListener('focus', refreshDeliveryTimePicker);
-  $('deliveryTimePicker').addEventListener('change', (e)=>{
-    if(e.target.value) $('deliveryTimeAddress').value = e.target.value;
-  });
 
   $('addDeliveryTimeBtn').addEventListener('click', async ()=>{
     const address = $('deliveryTimeAddress').value.trim();
@@ -821,6 +806,8 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
     clearStatus();
     $('manifestArea').innerHTML = `<div class="empty-state" data-i18n="emptyState">${t('emptyState')}</div>`;
     lastRouteData = null;
+    pinnedAddresses = new Set();
+    preManualEditSnapshot = null;
   });
 
   // Appends new address lines to whatever is already in the "Fix
@@ -837,52 +824,6 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
   $('sendToVerifyBtn').addEventListener('click', ()=>{
     appendToVerifyTextarea($('addressList').value);
     switchToTab('verify');
-  });
-
-  // Exports just the raw address list (no distances/times/totals) in
-  // whichever format is picked in the dropdown next to it. Content is
-  // just the addresses, nothing else — the export timestamp only shows
-  // up in the filename here, not inside the file (unlike the full
-  // route export, which includes it in the summary).
-  function buildAddressesExportContent(addresses, format){
-    const stamp = timestampForFilename();
-    if(format === 'json'){
-      return { filename: `addresses_${stamp}.json`, content: JSON.stringify(addresses, null, 2), mime: 'application/json' };
-    }
-    if(format === 'csv'){
-      const lines = [csvEscape(t('section1Label')), ...addresses.map(csvEscape)];
-      return { filename: `addresses_${stamp}.csv`, content: '\uFEFF' + lines.join('\r\n'), mime: 'text/csv' };
-    }
-    return { filename: `addresses_${stamp}.txt`, content: addresses.join('\n'), mime: 'text/plain' };
-  }
-
-  function getAddressesForExport(){
-    return $('addressList').value
-      .split(/\r?\n/)
-      .map(l=>l.trim())
-      .filter(l=>l.length>0 && !l.startsWith('#'));
-  }
-
-  $('exportAddressesBtn').addEventListener('click', async ()=>{
-    const addresses = getAddressesForExport();
-    if(addresses.length === 0){
-      showStatus(t('exportAddressesEmpty'), 'error');
-      return;
-    }
-    const { filename, content, mime } = buildAddressesExportContent(addresses, $('addressExportFormat').value);
-    const result = await downloadFile(filename, content, mime);
-    if(result.status === 'fallback'){
-      showStatus(fallbackNoticeFor(result.reason), 'info');
-    }
-  });
-
-  $('exportAddressesQrBtn').addEventListener('click', async ()=>{
-    const addresses = getAddressesForExport();
-    if(addresses.length === 0){
-      showStatus(t('exportAddressesEmpty'), 'error');
-      return;
-    }
-    await shareAddressesViaQr(addresses);
   });
 
   // ---------- Status ----------
@@ -1011,6 +952,7 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
   // Same exact/approximate matching logic as aliases, applied to the
   // list of addresses blocked for the van.
   function findBlockedMatch(address){
+    if(!walkOnlyEnabled) return null;
     const target = normalizeForMatch(address);
     const exactHit = blocked.find(b => normalizeForMatch(b.address) === target);
     if(exactHit) return exactHit;
@@ -1097,15 +1039,44 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
   }
 
   // ---------- Render manifest ----------
+  // A stop can be manually dragged/renumbered UNLESS it's one of the two
+  // slots the optimizer always fixes on its own: index 0 (always first)
+  // or, on a round trip, the last index (the repeated return-to-start
+  // address — not a real, independent stop to reorder). Kept as one
+  // shared check so rendering and the move logic can never disagree
+  // about which stops are eligible.
+  function isMovableStop(idx, total, roundTrip){
+    return idx > 0 && !(roundTrip && idx === total - 1);
+  }
+
   function renderManifestSkeleton(addressLabels){
     const area = $('manifestArea');
-    let html = '<div class="manifest">';
+    const roundTrip = !!$('startEndAddress').value.trim();
+    // Shown once, above the first stop, only when there's actually
+    // something to reorder — the drag/click affordance on each marker is
+    // otherwise easy to miss entirely (no visual cue beyond a cursor
+    // change), especially on a long list where dragging is the only
+    // practical way to move a stop far from where it sits.
+    let html = addressLabels.some((_, idx) => isMovableStop(idx, addressLabels.length, roundTrip))
+      ? `<div class="hint manifest-reorder-hint">↕ ${escapeHtml(t('manifestReorderHint'))}</div>`
+      : '';
+    html += '<div class="manifest">';
     addressLabels.forEach((entry, idx)=>{
       const isFinal = idx === addressLabels.length - 1;
+      const movable = isMovableStop(idx, addressLabels.length, roundTrip);
+      const pinned = movable && pinnedAddresses.has(entry.address);
+      const wide = (idx + 1) >= 100;
+      // Same blue as the map marker for a walk-only stop (see map.js's
+      // WALK_ONLY_BLUE) — one colour, one meaning, in both places: "the
+      // van doesn't drive here", clearly apart from the normal amber.
+      const walkOnly = !!entry.walkOnly;
       html += `
         <div class="stop" data-stop="${idx}">
           <div class="marker-col">
-            <div class="marker ${isFinal?'final':''}">${isFinal ? '⚑' : idx+1}</div>
+            <div class="marker ${isFinal?'final':''} ${movable?'movable':''} ${pinned?'pinned':''} ${wide?'wide':''} ${walkOnly?'walk-only':''}"
+                 data-stop="${idx}" ${movable ? 'draggable="true"' : ''}
+                 title="${movable ? escapeHtml(t('manifestMoveHint')) : ''}">${isFinal ? '⚑' : idx+1}</div>
+            ${pinned ? `<span class="pin-badge" data-stop="${idx}" title="${escapeHtml(t('manifestUnpinHint'))}">📌</span>` : ''}
             ${isFinal ? '' : '<div class="track"></div>'}
           </div>
           <div class="stop-content">
@@ -1234,12 +1205,19 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
 
     html += `</div>`;
 
+    // Same shape as the address-list export row in section 02: format
+    // <select>, one download button, one QR button — the chosen format
+    // sticks across route recalculations (this whole block is re-rendered
+    // each time) and across page loads.
+    let savedFormat = 'txt';
+    try{ savedFormat = localStorage.getItem(ROUTE_EXPORT_FORMAT_KEY) || 'txt'; } catch(err){ /* ignora */ }
+    const formatOptions = Object.keys(ROUTE_EXPORT_FORMATS)
+      .map(f => `<option value="${f}" ${f === savedFormat ? 'selected' : ''}>${f.toUpperCase()}</option>`).join('');
     html += `
-      <div style="display:flex; gap:8px; margin-top:16px;">
-        <button class="btn-ghost export-btn" data-format="csv" style="flex:1; text-align:center;">⬇ CSV</button>
-        <button class="btn-share-qr export-qr-btn" data-format="csv" title="${t('qrShareBtnTitle')}">📱</button>
-        <button class="btn-ghost export-btn" data-format="txt" style="flex:1; text-align:center;">⬇ TXT</button>
-        <button class="btn-share-qr export-qr-btn" data-format="txt" title="${t('qrShareBtnTitle')}">📱</button>
+      <div class="route-export-row">
+        <select id="routeExportFormat">${formatOptions}</select>
+        <button class="btn-ghost export-btn">⬇ ${t('exportRouteBtn')}</button>
+        <button class="btn-share-qr export-qr-btn" title="${t('qrShareBtnTitle')}">📱</button>
       </div>
     `;
 
@@ -1250,6 +1228,10 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
         </button>
         <div class="hint" style="text-align:center; margin-top:6px;">${t('optimizeBtnHint')}</div>
       `;
+    }
+
+    if(preManualEditSnapshot){
+      html += `<button class="btn-ghost undo-manual-order-btn">${t('undoManualOrderBtn')}</button>`;
     }
 
     $('totalsArea').innerHTML = html;
@@ -1429,6 +1411,10 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
       }
     }
 
+    // Price around THIS route's start (an alias coordinate if there is
+    // one, otherwise the address text — the server resolves either
+    // through the geocode cache the legs above just filled).
+    await fetchFuelEstimate(labels[0].coord || labels[0].address);
     const fuelCost = (fuelEstimate && fuelEstimate.consumption > 0 && fuelEstimate.price > 0)
       ? (drivingMeters/1000) * (fuelEstimate.consumption/100) * fuelEstimate.price
       : null;
@@ -1441,6 +1427,7 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
       breakMinutes, stopMinutes, startTime, canOptimize,
       fuelCost, fuelCurrency: fuelEstimate?.currency,
       fuelConsumption: fuelEstimate?.consumption, fuelPrice: fuelEstimate?.price,
+      fuelSource: fuelEstimate?.source, fuelStations: fuelEstimate?.stations,
     };
 
     const walkOnlyStops = labels.filter(l => l.walkOnly);
@@ -1529,6 +1516,16 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
   window.applyReorderedRoute = applyReorderedRoute;
 
   $('calcBtn').addEventListener('click', () => runCalculate());
+
+  // ---------- Collapsible sidebar sections (01-07) ----------
+  // Open by default (no change there); clicking a section's own title
+  // collapses/expands just that section. Purely visual (CSS display:none
+  // on everything but the title), so nothing inside stops working.
+  document.querySelectorAll('.sidebar-section > .block-label').forEach((label) => {
+    label.addEventListener('click', () => {
+      label.parentElement.classList.toggle('collapsed');
+    });
+  });
 
   // ---------- Scroll to top/bottom ----------
   $('scrollTopBtn').addEventListener('click', () => window.scrollTo({ top: 0, behavior: 'smooth' }));
@@ -1638,7 +1635,10 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
       summary.push([t('scheduleArrival'), computeEndTime(data.startTime, totalWithBreak)]);
     }
     if(data.fuelCost !== null && data.fuelCost !== undefined){
-      const fuelLabel = `${t('fuelCost')} (${t('fuelEstimatedNote')})`;
+      const note = data.fuelSource === 'live' ? t('fuelExportNoteLive', { stations: data.fuelStations })
+        : data.fuelSource === 'manual' ? t('fuelExportNoteManual')
+        : t('fuelEstimatedNote');
+      const fuelLabel = `${t('fuelCost')} (${note})`;
       const basis = `${data.fuelConsumption.toFixed(1)} L/100km @ ${data.fuelPrice.toFixed(2)}${data.fuelCurrency ? ' ' + data.fuelCurrency : ''}/L`;
       summary.push([fuelLabel, `${data.fuelCost.toFixed(2)}${data.fuelCurrency ? ' ' + data.fuelCurrency : ''} (${basis})`]);
     }
@@ -1689,6 +1689,57 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
     lines.push('');
     lines.push(t('createdBy'));
     return lines.join('\n');
+  }
+
+  // Machine-readable twin of the CSV/TXT: the same stops, legs and
+  // summary, plus the raw numbers behind the formatted texts.
+  function buildRouteJSON(data){
+    const stops = data.labels.map((label, i)=>{
+      const leg = i === 0 ? null : data.legResults[i-1];
+      return {
+        seq: i + 1,
+        address: label.address,
+        coordinate: label.coord || null,
+        walkOnly: !!label.walkOnly,
+        deadline: label.deadlineMinutes != null ? formatDeadlineHHMM(label.deadlineMinutes) : null,
+        arrivalTime: i === 0 ? null : (data.arrivalTimes[i-1] || null),
+        lateByMinutes: i === 0 ? null : (data.lateInfoList[i-1] ? Math.round(data.lateInfoList[i-1].byMinutes) : null),
+        legFromPrevious: !leg ? null : leg.error
+          ? { error: leg.error }
+          : { distanceMeters: leg.distanceMeters, distanceText: leg.distanceText, durationSeconds: leg.durationSeconds, durationText: leg.durationText },
+      };
+    });
+    const summary = {};
+    buildExportSummary(data).forEach(([label, value])=>{ summary[label] = value; });
+    return JSON.stringify({
+      generatedAt: new Date().toISOString(),
+      startTime: data.startTime || null,
+      breakMinutes: data.breakMinutes,
+      stopMinutes: data.stopMinutes,
+      totalDistanceMeters: data.totalMeters,
+      totalDurationSeconds: data.totalSeconds,
+      fuel: data.fuelCost == null ? null : {
+        cost: Math.round(data.fuelCost * 100) / 100, currency: data.fuelCurrency || null,
+        pricePerLitre: data.fuelPrice, consumptionPer100km: data.fuelConsumption, source: data.fuelSource || null,
+      },
+      stops,
+      summary,
+      createdBy: t('createdBy'),
+    }, null, 2);
+  }
+
+  // One place to know what each export format produces, shared by the
+  // download button, the QR share button and the format <select>.
+  const ROUTE_EXPORT_FORMATS = {
+    txt:  { ext: 'txt',  mime: 'text/plain',       build: buildTXT, share: buildTXT },
+    csv:  { ext: 'csv',  mime: 'text/csv',         build: data => '﻿' + buildCSV(data), share: data => buildCSV(data) },
+    json: { ext: 'json', mime: 'application/json', build: buildRouteJSON, share: buildRouteJSON },
+  };
+  const ROUTE_EXPORT_FORMAT_KEY = 'route-tracker-route-export-format';
+  function routeExportFormat(){
+    const sel = $('routeExportFormat');
+    const value = sel ? sel.value : '';
+    return ROUTE_EXPORT_FORMATS[value] ? value : 'txt';
   }
 
   function timestampForFilename(){
@@ -1839,15 +1890,52 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
     }
   }
 
+  // Shares the CURRENT map route (already in its final, displayed order —
+  // this reuses exactly what /api/optimize + drag-and-drop reordering
+  // already produced, same as loadRouteOnMap()'s own request) as a
+  // long-lived (24h), trackable route for the driver's phone: see
+  // POST /api/share/route in server.js. Distinct from shareAddressesViaQr
+  // above, which only ever sends plain text.
+  async function shareRouteWithDriver(){
+    const { addresses: rawAddresses, deadlines: deadlineMinutes, roundTrip } = buildTextAddresses();
+    if(rawAddresses.length < 1){
+      showStatus(t('shareRouteNeedsRoute'), 'error');
+      return;
+    }
+    // Same alias resolution loadRouteOnMap() applies before calling
+    // /api/route — the server geocodes whatever it's given, so an
+    // unresolved alias here would silently share the WRONG address.
+    const addresses = rawAddresses.map(addr => {
+      const aliasResult = resolveAlias(addr);
+      return aliasResult ? aliasResult.to : addr;
+    });
+    // buildTextAddresses() returns minutes-since-midnight (or null); the
+    // API wants "HH:MM" strings, same as /api/delivery-times.
+    const deadlines = deadlineMinutes.map(m => m == null ? null :
+      `${String(Math.floor(m/60)).padStart(2,'0')}:${String(m%60).padStart(2,'0')}`);
+    try{
+      const res = await fetch('/api/share/route', {
+        method: 'POST',
+        headers: {'Content-Type': 'application/json'},
+        body: JSON.stringify({ addresses, deadlines, roundTrip }),
+      });
+      const data = await res.json();
+      if(!res.ok){
+        showStatus(data.error || t('shareRouteError'), 'error');
+        return;
+      }
+      showQrModal(data.url, data.qrDataUrl, data.expiresInMinutes, data.usedLanFallback, data.lanFallbackFailed);
+    } catch(err){
+      showStatus(t('serverContactError'), 'error');
+    }
+  }
+  const mapToolShareDriverBtn = $('mapToolShareDriver');
+  if(mapToolShareDriverBtn) mapToolShareDriverBtn.addEventListener('click', shareRouteWithDriver);
+
   async function handleExport(format){
     if(!lastRouteData) return;
-    const stamp = timestampForFilename();
-    let result;
-    if(format === 'csv'){
-      result = await downloadFile(`route_${stamp}.csv`, '\uFEFF' + buildCSV(lastRouteData), 'text/csv');
-    } else {
-      result = await downloadFile(`route_${stamp}.txt`, buildTXT(lastRouteData), 'text/plain');
-    }
+    const fmt = ROUTE_EXPORT_FORMATS[format] || ROUTE_EXPORT_FORMATS.txt;
+    const result = await downloadFile(`route_${timestampForFilename()}.${fmt.ext}`, fmt.build(lastRouteData), fmt.mime);
     if(result.status === 'fallback'){
       showStatus(fallbackNoticeFor(result.reason), 'info');
     }
@@ -1855,18 +1943,177 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
 
   async function handleExportQr(format){
     if(!lastRouteData) return;
-    const stamp = timestampForFilename();
-    if(format === 'csv'){
-      await shareViaQr(`route_${stamp}.csv`, buildCSV(lastRouteData), 'text/csv');
-    } else {
-      await shareViaQr(`route_${stamp}.txt`, buildTXT(lastRouteData), 'text/plain');
+    const fmt = ROUTE_EXPORT_FORMATS[format] || ROUTE_EXPORT_FORMATS.txt;
+    await shareViaQr(`route_${timestampForFilename()}.${fmt.ext}`, fmt.share(lastRouteData), fmt.mime);
+  }
+
+  // ---------- Manual stop reordering (drag a marker, or type a number) ----------
+  function saveManualEditSnapshot(){
+    preManualEditSnapshot = {
+      addressListValue: $('addressList').value,
+      pinnedAddresses: new Set(pinnedAddresses),
+    };
+  }
+
+  function undoManualEdit(){
+    if(!preManualEditSnapshot) return;
+    $('addressList').value = preManualEditSnapshot.addressListValue;
+    pinnedAddresses = preManualEditSnapshot.pinnedAddresses;
+    preManualEditSnapshot = null;
+    refreshAliasPicker();
+    refreshBlockedPicker();
+    runCalculate(true, true);
+  }
+
+  // Rewrites the address list textarea in the given order — same
+  // reorder-and-rewrite runOptimize() already does after a server-side
+  // reorder (deadline suffixes preserved, start/end excluded from the
+  // rewritten lines), just driven by a manual move instead.
+  function applyManifestOrder(newOrder, rawAddresses, deadlines, roundTrip){
+    const reordered = newOrder.map(i => ({ address: rawAddresses[i], deadlineMinutes: deadlines[i] }));
+    const stops = roundTrip ? reordered.slice(1, -1) : reordered;
+    const lines = stops.map(entry =>
+      entry.deadlineMinutes != null ? `${entry.address} | ${formatDeadlineHHMM(entry.deadlineMinutes)}` : entry.address
+    );
+    $('addressList').value = lines.join('\n');
+    refreshAliasPicker();
+    refreshBlockedPicker();
+    runCalculate(true, true); // re-render + redraw the map, keep the current view
+  }
+
+  // fromIdx/toIdx are full-array indices (0 = first stop, matching the
+  // marker's own displayed number minus one) — see isMovableStop for
+  // which ones are actually eligible.
+  function moveManifestStop(fromIdx, toIdx){
+    const { addresses: rawAddresses, deadlines, roundTrip } = buildTextAddresses();
+    const n = rawAddresses.length;
+    if(fromIdx === toIdx || !isMovableStop(fromIdx, n, roundTrip) || !isMovableStop(toIdx, n, roundTrip)){
+      return;
     }
+    saveManualEditSnapshot();
+    pinnedAddresses.add(rawAddresses[fromIdx]);
+
+    const order = Array.from({length: n}, (_, i) => i);
+    const [moved] = order.splice(fromIdx, 1);
+    order.splice(toIdx, 0, moved);
+
+    applyManifestOrder(order, rawAddresses, deadlines, roundTrip);
+  }
+
+  function unpinManifestStop(idx){
+    const { addresses: rawAddresses } = buildTextAddresses();
+    pinnedAddresses.delete(rawAddresses[idx]);
+    // Unpinning doesn't move anything itself, it only changes what the
+    // NEXT optimize call is free to touch — but the badge still needs to
+    // disappear now, and a full recalc is the simplest way to do that
+    // without hand-rebuilding just one marker's tags (alias/walk/deadline)
+    // from scratch.
+    runCalculate(true, true);
+  }
+
+  let draggedStopIdx = null;
+
+  $('manifestArea').addEventListener('dragstart', (e)=>{
+    const marker = e.target.closest('.marker.movable');
+    if(!marker){ e.preventDefault(); return; }
+    draggedStopIdx = parseInt(marker.getAttribute('data-stop'), 10);
+    e.dataTransfer.effectAllowed = 'move';
+  });
+  $('manifestArea').addEventListener('dragover', (e)=>{
+    const stop = e.target.closest('.stop');
+    if(!stop || draggedStopIdx === null) return;
+    e.preventDefault();
+    const marker = stop.querySelector('.marker.movable');
+    if(marker) marker.classList.add('drag-over');
+  });
+  $('manifestArea').addEventListener('dragleave', (e)=>{
+    const marker = e.target.closest('.marker');
+    if(marker) marker.classList.remove('drag-over');
+  });
+  $('manifestArea').addEventListener('drop', (e)=>{
+    const stop = e.target.closest('.stop');
+    document.querySelectorAll('#manifestArea .marker.drag-over').forEach(m => m.classList.remove('drag-over'));
+    if(!stop || draggedStopIdx === null) return;
+    e.preventDefault();
+    const toIdx = parseInt(stop.getAttribute('data-stop'), 10);
+    moveManifestStop(draggedStopIdx, toIdx);
+    draggedStopIdx = null;
+  });
+
+  // Typing a number directly on the marker: click swaps it for a small
+  // input pre-filled with the current position; Enter/blur applies the
+  // move (via the exact same moveManifestStop as dragging), Escape
+  // cancels without changing anything.
+  function startManifestNumberEdit(markerEl){
+    const idx = parseInt(markerEl.getAttribute('data-stop'), 10);
+    const { addresses: rawAddresses, roundTrip } = buildTextAddresses();
+    const n = rawAddresses.length;
+    const originalHtml = markerEl.outerHTML; // restored verbatim on cancel/invalid input — see restore() below
+    const input = document.createElement('input');
+    input.type = 'number';
+    input.className = 'marker-num-input' + (n >= 100 ? ' wide' : '');
+    input.value = idx + 1;
+    input.min = 2; // position 1 is always fixed
+    input.max = roundTrip ? n - 1 : n;
+    // A native number input doesn't grow with its own content — sized
+    // here for the WIDEST value this route could ever need (its total
+    // stop count), so typing "999" is never cramped tighter than typing "9".
+    input.style.width = `${30 + Math.max(0, String(n).length - 2) * 8}px`;
+    markerEl.replaceWith(input);
+    input.focus();
+    input.select();
+
+    let settled = false;
+    // Restoring the marker's own original HTML — rather than re-rendering
+    // the whole skeleton from a bare {address} — is what keeps its alias/
+    // walk-only/deadline tags intact; those live on the FULL addressLabels
+    // entry this function never had in the first place.
+    const restore = () => { input.outerHTML = originalHtml; };
+    const commit = () => {
+      if(settled) return;
+      settled = true;
+      const typed = parseInt(input.value, 10);
+      const clamped = Number.isInteger(typed)
+        ? Math.max(Number(input.min), Math.min(Number(input.max), typed))
+        : idx + 1;
+      const targetIdx = clamped - 1;
+      // moveManifestStop() itself no-ops on fromIdx === toIdx (nothing to
+      // reorder), so blurring without actually changing the number — by
+      // far the most common way this input closes — has to be handled
+      // here instead, or the input is left on screen forever with
+      // nothing left to ever swap it back for a marker.
+      if(targetIdx === idx){
+        restore();
+      } else {
+        moveManifestStop(idx, targetIdx);
+      }
+    };
+    input.addEventListener('blur', commit);
+    input.addEventListener('keydown', (ev)=>{
+      if(ev.key === 'Enter'){ ev.preventDefault(); input.blur(); }
+      if(ev.key === 'Escape'){ settled = true; restore(); }
+    });
   }
 
   $('manifestArea').addEventListener('click', (e)=>{
     const shareBtn = e.target.closest('.share-btn');
     if(shareBtn){
       handleShareClick(shareBtn.getAttribute('data-address'), shareBtn.getAttribute('data-coord'), shareBtn);
+      return;
+    }
+    const pinBadge = e.target.closest('.pin-badge');
+    if(pinBadge){
+      unpinManifestStop(parseInt(pinBadge.getAttribute('data-stop'), 10));
+      return;
+    }
+    const undoBtn = e.target.closest('.undo-manual-order-btn');
+    if(undoBtn){
+      undoManualEdit();
+      return;
+    }
+    const movableMarker = e.target.closest('.marker.movable');
+    if(movableMarker){
+      startManifestNumberEdit(movableMarker);
       return;
     }
     const copyAddrBtn = e.target.closest('.copy-addr-btn');
@@ -1881,14 +2128,20 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
     }
     const exportBtn = e.target.closest('.export-btn');
     if(exportBtn){
-      handleExport(exportBtn.getAttribute('data-format'));
+      handleExport(routeExportFormat());
       return;
     }
     const exportQrBtn = e.target.closest('.export-qr-btn');
     if(exportQrBtn){
-      handleExportQr(exportQrBtn.getAttribute('data-format'));
+      handleExportQr(routeExportFormat());
       return;
     }
+  });
+  // Delegated like the clicks above: #totalsArea itself is thrown away
+  // and rebuilt on every calculation, #manifestArea isn't.
+  $('manifestArea').addEventListener('change', (e)=>{
+    if(e.target.id !== 'routeExportFormat') return;
+    try{ localStorage.setItem(ROUTE_EXPORT_FORMAT_KEY, e.target.value); } catch(err){ /* ignora */ }
   });
 
   // ---------- Optimize route (appears after calculating) ----------
@@ -1911,6 +2164,12 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
       const aliasResult = resolveAlias(addr);
       return aliasResult ? aliasResult.to : addr;
     });
+    // Stops manually dragged/renumbered in the "→ ROUTE" panel (see
+    // moveManifestStop) — sent as indices into THIS SAME array, matching
+    // optimizeOrder's lockedIndices contract in src/optimizer.js.
+    const lockedIndices = rawAddresses
+      .map((addr, i) => pinnedAddresses.has(addr) ? i : -1)
+      .filter(i => i !== -1);
 
     const startTimeVal = $('startTime').value;
     let startMinutes = null;
@@ -1929,7 +2188,7 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
       const res = await fetch('/api/optimize', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ addresses: locations, mode, roundTrip, restricted, deadlines, startMinutes, stopMinutes: stopMinutesVal }),
+        body: JSON.stringify({ addresses: locations, mode, roundTrip, restricted, deadlines, startMinutes, stopMinutes: stopMinutesVal, lockedIndices }),
       });
       const data = await res.json();
       if(!res.ok){
@@ -2859,15 +3118,112 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
     try{ localStorage.setItem(STARTEND_STORAGE_KEY, e.target.value.trim()); } catch(err){ /* ignora */ }
   });
 
-  // ---------- Fuel (automatic estimate, no fields in the interface) ----------
-  // Asks the server once for a consumption/price estimate based on the
-  // approximate location (IP) and a default value typical of a
-  // delivery van. Only used in exported files (CSV/TXT).
+  // ---------- Address list (saved locally; shared with /manage/addresses) ----------
+  // The textarea IS the address list — there's no server copy. Mirroring
+  // it to localStorage does two things: the list survives a reload, and
+  // the "Gerir todos" page for section 02 (public/manage.html, kind
+  // 'addresses') can edit the very same text from its own tab. Every
+  // code path that rewrites the textarea (file upload, reorder, undo,
+  // "Corrigir endereços" send-back) funnels through here via the
+  // 'input' event or the explicit save below.
+  const ADDRESSES_STORAGE_KEY = 'route-tracker-addresses';
+  let lastSyncedAddressList = null; // what textarea and storage last agreed on
+  function saveAddressListLocally(){
+    const value = $('addressList').value;
+    if(value === lastSyncedAddressList) return;
+    try{ localStorage.setItem(ADDRESSES_STORAGE_KEY, value); lastSyncedAddressList = value; } catch(err){ /* ignora */ }
+  }
+  function restoreAddressListLocally(){
+    try{
+      const saved = localStorage.getItem(ADDRESSES_STORAGE_KEY);
+      if(saved == null || saved === lastSyncedAddressList) return;
+      lastSyncedAddressList = saved;
+      if(saved !== $('addressList').value){
+        $('addressList').value = saved;
+        refreshAliasPicker(); refreshBlockedPicker(); refreshDeliveryTimePicker();
+      }
+    } catch(err){ /* ignora */ }
+  }
+  restoreAddressListLocally();
+  $('addressList').addEventListener('input', saveAddressListLocally);
+  // Programmatic `.value =` writes (file upload, reorder, undo, …) fire no
+  // DOM event at all, so a slow poll picks those up; it only ever pushes
+  // when the TEXTAREA moved away from the last agreed value, so a save
+  // landing from the other tab is never clobbered by it.
+  setInterval(()=>{ if(document.activeElement !== $('addressList')) saveAddressListLocally(); }, 1500);
+  window.addEventListener('focus', restoreAddressListLocally);
+  window.addEventListener('storage', (e)=>{ if(e.key === ADDRESSES_STORAGE_KEY) restoreAddressListLocally(); });
+
+  // ---------- Fuel (section 08) ----------
+  // The price behind the cost line in exports. Refreshed on every route
+  // calculation with the route's own starting point (see runCalculate),
+  // so the server can average the French stations nearest to it; the
+  // page-load call below (no origin) just fills the panel with whichever
+  // fallback applies until then.
   let fuelEstimate = null;
-  try{
-    const res = await fetch('/api/fuel-estimate');
-    if(res.ok) fuelEstimate = await res.json();
-  } catch(err){ /* sem estimativa, exportações ficam sem esta linha */ }
+
+  function fuelSourceText(est){
+    if(!est) return '';
+    if(est.source === 'live'){
+      return t('fuelSourceLive', { stations: est.stations, km: est.farthestKm, town: est.nearestTown || '', eur: est.priceEur.toFixed(3), rate: est.fxRate.toFixed(4) });
+    }
+    if(est.source === 'manual') return t('fuelSourceManual');
+    return t('fuelSourceTable', { country: est.countryCode || '?' });
+  }
+
+  function renderFuelEstimate(){
+    const box = $('fuelCurrentArea');
+    if(!box) return;
+    if(!fuelEstimate){ box.innerHTML = `<div class="hint">${t('fuelUnavailable')}</div>`; return; }
+    const warn = fuelEstimate.source !== 'live' && fuelEstimate.liveError ? `<div class="hint">${t('fuelLiveFailed', { msg: escapeHtml(fuelEstimate.liveError) })}</div>` : '';
+    box.innerHTML = `
+      <div><strong>${fuelEstimate.price.toFixed(2)} ${escapeHtml(fuelEstimate.currency)}/L</strong> · ${fuelEstimate.consumption.toFixed(1)} L/100 km</div>
+      <div class="hint" style="margin-top:4px;">${escapeHtml(fuelSourceText(fuelEstimate))}</div>${warn}`;
+  }
+
+  async function fetchFuelEstimate(origin){
+    try{
+      const q = origin ? '?origin=' + encodeURIComponent(origin) : '';
+      const res = await fetch('/api/fuel-estimate' + q);
+      if(res.ok) fuelEstimate = await res.json();
+    } catch(err){ /* keeps whatever estimate we had; exports just reuse it */ }
+    renderFuelEstimate();
+  }
+
+  async function loadFuelSettings(){
+    try{
+      const res = await fetch('/api/fuel-settings');
+      if(!res.ok) return;
+      const s = await res.json();
+      $('fuelCurrencyLabel').textContent = s.currency;
+      $('fuelManualPrice').value = s.manualPrice != null ? s.manualPrice : '';
+      $('fuelConsumption').value = s.consumption != null ? s.consumption : '';
+      $('fuelConsumption').placeholder = String(s.defaultConsumption);
+    } catch(err){ /* secção fica com os placeholders */ }
+  }
+
+  $('saveFuelSettingsBtn').addEventListener('click', async ()=>{
+    const area = $('fuelStatusArea');
+    try{
+      const res = await fetch('/api/fuel-settings', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ manualPrice: $('fuelManualPrice').value, consumption: $('fuelConsumption').value }),
+      });
+      const data = await res.json();
+      if(!res.ok) throw new Error(data.error || res.statusText);
+      area.innerHTML = `<div class="status-banner ok">${t('fuelSaved')}</div>`;
+      // Re-ask with the last route's start so the panel (and the next
+      // export) reflect the new manual price / consumption right away.
+      await fetchFuelEstimate(lastRouteData && lastRouteData.labels && lastRouteData.labels[0] ? (lastRouteData.labels[0].coord || lastRouteData.labels[0].address) : '');
+    } catch(err){
+      area.innerHTML = `<div class="status-banner error">${t('fuelSaveError', { msg: escapeHtml(err.message) })}</div>`;
+    }
+    setTimeout(()=>{ area.innerHTML = ''; }, 4000);
+  });
+
+  await loadFuelSettings();
+  await fetchFuelEstimate('');
 
   await fetchAliases();
   renderAliases();
@@ -2876,8 +3232,40 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
   await fetchDeliveryTimes();
   renderDeliveryTimes();
   refreshCacheStats();
+
+  // The "Gerir todos" pages edit the same server-side lists in another
+  // tab; coming back here should show that work, not a stale copy.
+  window.addEventListener('focus', async ()=>{
+    await fetchAliases(); renderAliases(); refreshAliasPicker();
+    await fetchBlocked(); renderBlocked(); refreshBlockedPicker();
+    await fetchDeliveryTimes(); renderDeliveryTimes(); refreshDeliveryTimePicker();
+  });
   updateFileDropText();
-  if(window.RouteMapUI) window.RouteMapUI.init({ t, escapeHtml });
+  if(window.RouteMapUI) window.RouteMapUI.init({
+    t, escapeHtml,
+    // "Agrupar (a pé)" saves directly to /api/blocked itself (same
+    // endpoint section 04's picker uses) — this is only the refresh: the
+    // picker/manifest tags need to pick up what the map just saved, and
+    // the driver needs to see whether it actually worked.
+    onBlockedAddressesChanged: ({ successCount, total }) => {
+      refreshBlockedPicker();
+      runCalculate(true, true);
+      if(successCount === total){
+        showStatus(t('groupWalkSuccess', { count: successCount }), 'ok');
+      } else if(successCount > 0){
+        showStatus(t('groupWalkPartialError', { count: total - successCount, total }), 'error');
+      } else {
+        showStatus(t('serverContactError'), 'error');
+      }
+    },
+    // The master "Endereços a pé" toggle lives on the map screen, but
+    // findBlockedMatch() (and therefore the restricted[] flags sent to
+    // /api/optimize and /api/distance) is index.html's own logic.
+    onWalkOnlyEnabledChanged: (enabled) => {
+      walkOnlyEnabled = enabled;
+      runCalculate(true, true);
+    },
+  });
 })();
 </script>
 

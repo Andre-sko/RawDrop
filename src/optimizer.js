@@ -13,30 +13,53 @@
 // of the list) — neither nearest-neighbor nor 2-opt move it from the
 // last position.
 //
-// deadlineOptions (optional) makes this deadline-aware — this is a
-// simplified take on the Vehicle Routing Problem with Time Windows
-// (VRPTW), not an exact solver (that's a much harder problem). Instead:
-//   - deadlines[i]: minutes-since-midnight this stop must be reached by
-//     (or null for no deadline)
-//   - startMinutes: minutes-since-midnight the route begins
-//   - stopMinutes: time spent AT each stop before leaving for the next
-// With these set, both the construction step and the 2-opt pass use a
-// cost function that heavily penalizes arriving after a deadline —
-// enough that avoiding lateness always wins over a shorter route, but
-// ties among equally-late (or equally on-time) options still favor
-// less driving. It does NOT guarantee a feasible (all on-time) route
-// exists — if the deadlines are simply too tight for one vehicle, some
-// stops will still end up late; the caller should check for that (see
-// computeLatenessReport below) rather than assume success.
-function optimizeOrder(durations, roundTrip, deadlineOptions) {
+// options (all optional):
+//   - deadlines, startMinutes, stopMinutes: makes this deadline-aware —
+//     a simplified take on the Vehicle Routing Problem with Time Windows
+//     (VRPTW), not an exact solver (that's a much harder problem).
+//       - deadlines[i]: minutes-since-midnight this stop must be reached
+//         by (or null for no deadline)
+//       - startMinutes: minutes-since-midnight the route begins
+//       - stopMinutes: time spent AT each stop before leaving for the next
+//     With these set, both the construction step and the 2-opt pass use
+//     a cost function that heavily penalizes arriving after a deadline —
+//     enough that avoiding lateness always wins over a shorter route,
+//     but ties among equally-late (or equally on-time) options still
+//     favor less driving. It does NOT guarantee a feasible (all on-time)
+//     route exists — if the deadlines are simply too tight for one
+//     vehicle, some stops will still end up late; the caller should
+//     check for that (see computeLatenessReport below) rather than
+//     assume success.
+//   - lockedIndices: indices the caller has manually placed and wants
+//     left exactly where they are — the driver dragged (or typed a
+//     position for) that stop in the interface. A "lock" is always
+//     self-referential: index i locked means output[i] must equal i,
+//     never an arbitrary "move index i to position k" remap. That is
+//     deliberate — the caller (server.js) already reorders its own
+//     input array so a manually placed stop SITS at the index it was
+//     dragged to before ever calling this, so by the time a lock gets
+//     here it only ever needs to mean "don't move this one again". It
+//     also sidesteps an entire class of conflict ("two different stops
+//     locked to the same slot") that a remap-based API would have to
+//     validate — with self-referential locks, that situation cannot
+//     even be expressed. Index 0 (always) and, on a round trip, the
+//     last index (also always) are already fixed the same way, whether
+//     or not the caller repeats them here.
+function optimizeOrder(durations, roundTrip, options) {
   const n = durations.length;
   const lastIdx = n - 1;
   const fixLast = !!roundTrip && n > 2;
 
-  const deadlines = deadlineOptions && Array.isArray(deadlineOptions.deadlines) ? deadlineOptions.deadlines : null;
-  const startMinutes = deadlineOptions && typeof deadlineOptions.startMinutes === "number" ? deadlineOptions.startMinutes : null;
-  const stopMinutes = (deadlineOptions && typeof deadlineOptions.stopMinutes === "number") ? deadlineOptions.stopMinutes : 0;
+  const deadlines = options && Array.isArray(options.deadlines) ? options.deadlines : null;
+  const startMinutes = options && typeof options.startMinutes === "number" ? options.startMinutes : null;
+  const stopMinutes = (options && typeof options.stopMinutes === "number") ? options.stopMinutes : 0;
   const hasDeadlines = !!(deadlines && startMinutes !== null && deadlines.some((d) => d != null));
+
+  const lockedIndices = new Set(
+    options && Array.isArray(options.lockedIndices)
+      ? options.lockedIndices.filter((i) => Number.isInteger(i) && i >= 0 && i < n)
+      : []
+  );
 
   // Big enough that a single minute of lateness always outweighs any
   // realistic amount of extra driving time (durations are in seconds).
@@ -82,13 +105,33 @@ function optimizeOrder(durations, roundTrip, deadlineOptions) {
   const visited = new Array(n).fill(false);
   visited[0] = true;
   if (fixLast) visited[lastIdx] = true;
+  // A locked index is reserved from the very start: never a candidate
+  // nearest-neighbour considers for any OTHER position, since it already
+  // knows exactly where it's going.
+  for (const idx of lockedIndices) visited[idx] = true;
 
-  let order = [0];
+  const order = new Array(n).fill(-1);
+  order[0] = 0;
+  if (fixLast) order[lastIdx] = lastIdx;
+  for (const idx of lockedIndices) order[idx] = idx;
+
   let current = 0;
   let elapsed = 0; // minutes since the round started — see routeLatenessMinutes
-  const stepsNeeded = fixLast ? n - 2 : n - 1;
+  // Positions the loop below actually has to decide, in visiting order —
+  // 0 is filled above, and (on a round trip) so is the last one; every
+  // position in between is either a lock already placed in `order` or
+  // still up for grabs.
+  const lastPosition = fixLast ? n - 2 : n - 1;
 
-  for (let step = 0; step < stepsNeeded; step++) {
+  for (let position = 1; position <= lastPosition; position++) {
+    if (lockedIndices.has(position)) {
+      // Already written into `order` above — just advance the "current
+      // location" bookkeeping past it, exactly as if it had been picked.
+      if (hasDeadlines) elapsed += durations[current][position] / 60 + stopMinutes;
+      current = position;
+      continue;
+    }
+
     let best = -1;
     let bestScore = Infinity;
     for (let j = 0; j < n; j++) {
@@ -125,14 +168,27 @@ function optimizeOrder(durations, roundTrip, deadlineOptions) {
       }
     }
     visited[best] = true;
-    order.push(best);
+    order[position] = best;
     if (hasDeadlines) {
       elapsed += durations[current][best] / 60 + stopMinutes;
     }
     current = best;
   }
 
-  if (fixLast) order.push(lastIdx);
+  // A locked index (see lockedIndices above) must stay at its own
+  // position through every local-search move — 2-opt reversals and
+  // Or-opt relocations otherwise have no idea it's not just another
+  // stop free to shuffle around. Checked post-hoc on each candidate
+  // (cheap: one lookup per lock) rather than by restricting which
+  // (i, k) ranges are even attempted — simpler to get right, and the
+  // number of locks is always small (a driver manually placing stops,
+  // not a bulk operation).
+  function respectsLocks(route) {
+    for (const idx of lockedIndices) {
+      if (route[idx] !== idx) return false;
+    }
+    return true;
+  }
 
   // 2-opt: reverse every stretch of the route in turn and keep any
   // reversal that comes out cheaper, until nothing does. It only ever
@@ -150,6 +206,7 @@ function optimizeOrder(durations, roundTrip, deadlineOptions) {
           const candidate = best
             .slice(0, i)
             .concat(best.slice(i, k + 1).reverse(), best.slice(k + 1));
+          if (!respectsLocks(candidate)) continue;
           const candidateCost = routeCost(candidate);
           // Cost of the incumbent is carried rather than recomputed on
           // every one of the n² candidates — on a 100-stop round that is
@@ -207,6 +264,7 @@ function optimizeOrder(durations, roundTrip, deadlineOptions) {
         for (let j = lo; j <= insertHi; j++) {
           if (j === i) continue; // same spot, no-op
           const candidate = withoutChain.slice(0, j).concat(chain, withoutChain.slice(j));
+          if (!respectsLocks(candidate)) continue;
           const candidateCost = routeCost(candidate);
           if (candidateCost < bestCost - 1e-6) {
             best = candidate;
@@ -254,8 +312,10 @@ function optimizeOrder(durations, roundTrip, deadlineOptions) {
   // pass and makes the guarantee absolute: this never returns a route
   // worse than the one it was given.
   //
-  // The given order already satisfies both pins: index 0 is first, and
-  // in a round trip the repeated address is last.
+  // The given order already satisfies every fixed slot: index 0 is
+  // first, the repeated address is last on a round trip, and — being
+  // the identity permutation — every locked index is trivially already
+  // at its own position too.
   const given = [];
   for (let i = 0; i < n; i++) given.push(i);
   const fromGiven = localSearch(given);

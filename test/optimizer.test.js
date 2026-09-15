@@ -267,6 +267,94 @@ describe("deadlines outrank a shorter route", () => {
   });
 });
 
+// Feature tests for `lockedIndices` (options.lockedIndices): a stop the
+// driver dragged/typed into a specific spot by hand must stay exactly
+// there — output position === its own input index — while everything
+// else still gets optimized around it. See optimizeOrder's own doc
+// comment for why a "lock" is expressed this way (self-referential)
+// rather than as an arbitrary index->position remap: the caller
+// (server.js) already reorders the input array itself before calling
+// this, so by the time it gets here "locked" always means "don't move
+// this index away from its own slot".
+describe("lockedIndices: a manually placed stop stays put", () => {
+  // Four points on a line, x = [0, 30, 10, 20] for indices 0..3.
+  // Left free, the true optimum visits them by distance: 0 -> 2(10) ->
+  // 3(20) -> 1(30), total cost 30. Locking index 1 into position 1 (its
+  // own slot) forces a worse total, but the REMAINING stops (2 and 3)
+  // must still be arranged optimally around that constraint.
+  const LINE = [
+    [0, 30, 10, 20],
+    [30, 0, 20, 10],
+    [10, 20, 0, 10],
+    [20, 10, 10, 0],
+  ];
+
+  test("left free, the far stop is not placed second", () => {
+    const order = optimizeOrder(LINE, false);
+    assert.notStrictEqual(order[1], 1, "pre-condicao do teste: sem bloqueio, o indice 1 nao fica em 2o");
+    assert.deepStrictEqual(order, [0, 2, 3, 1]);
+  });
+
+  test("locked into its own slot, it stays there and the rest re-optimizes around it", () => {
+    const order = optimizeOrder(LINE, false, { lockedIndices: [1] });
+    assert.strictEqual(order[1], 1, "o indice fixado tem de ficar exatamente na sua posicao");
+    assert.deepStrictEqual(order, [0, 1, 3, 2], "2 e 3 tem de continuar otimizados entre si, a seguir ao fixo");
+  });
+
+  test("several locked stops all stay put at once", () => {
+    // Five points, x = [0, 40, 10, 30, 20] for indices 0..4. Locking 1
+    // AND 3 leaves only indices 2 and 4 free, to be placed in whichever
+    // of the two remaining slots (2 and 4) is cheaper.
+    const m = [
+      [0, 40, 10, 30, 20],
+      [40, 0, 30, 10, 20],
+      [10, 30, 0, 20, 10],
+      [30, 10, 20, 0, 10],
+      [20, 20, 10, 10, 0],
+    ];
+    const order = optimizeOrder(m, false, { lockedIndices: [1, 3] });
+    assert.strictEqual(order[1], 1);
+    assert.strictEqual(order[3], 3);
+    assert.deepStrictEqual(order, [0, 1, 4, 3, 2]);
+  });
+
+  test("a lock overrides what a deadline would otherwise have preferred", () => {
+    // Same matrix/deadline as "deadlines outrank a shorter route" above,
+    // where an unlocked optimize picks [0, 2, 1] to make stop 2's
+    // deadline. Locking index 1 into position 1 leaves no freedom at all
+    // (n=3, position 0 and 2 already spoken for) — the lock has to win.
+    const m = [
+      [0, 300, 300],
+      [300, 0, 600],
+      [300, 900, 0],
+    ];
+    const order = optimizeOrder(m, false, {
+      deadlines: [null, null, 8 * 60 + 6],
+      startMinutes: 8 * 60,
+      stopMinutes: 0,
+      lockedIndices: [1],
+    });
+    assert.deepStrictEqual(order, [0, 1, 2]);
+  });
+
+  test("locking index 0 (or, in a round trip, the last index) changes nothing — both are already fixed", () => {
+    const withLock = optimizeOrder(LINE, false, { lockedIndices: [0] });
+    const withoutLock = optimizeOrder(LINE, false);
+    assert.deepStrictEqual(withLock, withoutLock);
+
+    const roundTripLine = LINE.map((row) => row.slice());
+    const lastIdx = roundTripLine.length - 1;
+    const withLastLock = optimizeOrder(roundTripLine, true, { lockedIndices: [lastIdx] });
+    const withoutLastLock = optimizeOrder(roundTripLine, true);
+    assert.deepStrictEqual(withLastLock, withoutLastLock);
+  });
+
+  test("no lockedIndices option at all behaves exactly as before (no regression)", () => {
+    assert.deepStrictEqual(optimizeOrder(LINE, false, {}), optimizeOrder(LINE, false));
+    assert.deepStrictEqual(optimizeOrder(LINE, false, { lockedIndices: [] }), optimizeOrder(LINE, false));
+  });
+});
+
 describe("the small cases do not fall over", () => {
   test("one stop", () => {
     assert.deepStrictEqual(optimizeOrder([[0]], false), [0]);

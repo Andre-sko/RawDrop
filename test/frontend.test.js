@@ -101,6 +101,40 @@ describe("frontend assets", () => {
     } finally { await s.stop(); }
   });
 
+  test("/manage/<kind> serves the editor page for each list, 404s otherwise, and parses", async () => {
+    const s = await startServer({});
+    try {
+      for (const kind of ["addresses", "aliases", "blocked", "delivery-times"]) {
+        const res = await fetch(s.baseUrl + "/manage/" + kind);
+        assert.strictEqual(res.status, 200, kind);
+        const html = await res.text();
+        assert.ok(html.includes('id="manageBody"'), kind + ": pagina errada");
+        for (const asset of extractLocalAssets(html)) {
+          assert.strictEqual((await fetch(s.baseUrl + asset)).status, 200, `asset em falta: ${asset}`);
+        }
+      }
+      assert.strictEqual((await fetch(s.baseUrl + "/manage/nope")).status, 404);
+      const js = await (await fetch(s.baseUrl + "/js/manage.js")).text();
+      assert.doesNotThrow(() => new vm.Script(js), "erro de sintaxe em /js/manage.js");
+      // Every translation key the editor asks for exists in every language.
+      const keys = [...js.matchAll(/(?<![\w.])t\('([A-Za-z0-9_]+)'/g)].map((m) => m[1]);
+      const tr = await (await fetch(s.baseUrl + "/js/translations.js")).text();
+      const sandbox = {}; new vm.Script(tr + ";this.T = TRANSLATIONS;").runInNewContext(sandbox);
+      for (const lang of Object.keys(sandbox.T)) {
+        for (const key of keys) assert.ok(key in sandbox.T[lang], `traducao em falta: ${lang}.${key}`);
+      }
+    } finally { await s.stop(); }
+  });
+
+  test("/manage/<kind> is behind the login like the rest of the interface", async () => {
+    const s = await startServer({ env: { APP_PASSWORD: "segredo", SESSION_SECRET: "x".repeat(32) } });
+    try {
+      const res = await fetch(s.baseUrl + "/manage/aliases", { redirect: "manual" });
+      assert.strictEqual(res.status, 302);
+      assert.ok((res.headers.get("location") || "").includes("/login"));
+    } finally { await s.stop(); }
+  });
+
   test("key interface elements are present in the HTML", async () => {
     const s = await startServer({});
     try {

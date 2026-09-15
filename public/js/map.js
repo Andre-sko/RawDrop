@@ -23,6 +23,16 @@
   let mapUnavailable = false;
   let t = (key) => key;
   let escapeHtml = (s) => String(s);
+  // Called after "Agrupar (a pé)" saves its bulk walk-only + parking
+  // point changes — index.html owns the blocked-addresses picker and the
+  // address list's 🚶 tags, so map.js hands the outcome back up instead
+  // of touching that state (or the top status banner) itself.
+  let onBlockedAddressesChanged = null;
+
+  // Called when the master "Endereços a pé" toggle flips — index.html's
+  // own findBlockedMatch() (and therefore /api/optimize's restricted[]
+  // flags) needs to know too, since map.js only owns the map-side view.
+  let onWalkOnlyEnabledChanged = null;
 
   let lastRequestParams = null; // { addresses, roundTrip, deadlines, startMinutes, stopMinutes }
   let lastRoute = null; // last successful /api/route response
@@ -38,7 +48,7 @@
   let preOptimizeRouteCache = null; // full /api/route response for that snapshot, once fetched
   let showingPreOptimizeRoute = false;
   let savedOptimizedState = null; // { lastRoute, routeIsOptimized, routeCumulative, routeStopMarkers } stashed while showing it
-  let mode = 'idle'; // 'idle' | 'block-line' | 'exclude-a' | 'exclude-b' | 'access-point'
+  let mode = 'idle'; // 'idle' | 'block-line' | 'exclude-a' | 'exclude-b' | 'access-point' | 'group-draw' | 'group-parking'
   let pickedA = null; // [lng, lat]
   let pickedB = null;
   let pendingPreview = null; // last /api/road-exclusion/preview response, while its panel is open
@@ -47,6 +57,25 @@
   // acesso manual" in the unreachable-stop notice) — set only while
   // mode === 'access-point'.
   let pendingAccessOverrideAddress = null;
+
+  // A plain 'crosshair' reads as "click a point", not "draw here" — a
+  // custom pencil cursor is what actually tells the driver they're in a
+  // free-drawing mode, not about to place a single pin.
+  const PENCIL_CURSOR = "url('data:image/svg+xml;charset=utf-8,%3Csvg xmlns=%27http://www.w3.org/2000/svg%27 width=%2728%27 height=%2728%27 viewBox=%270 0 28 28%27%3E%3Cg stroke=%27%23171208%27 stroke-width=%271%27 stroke-linejoin=%27round%27%3E%3Cpolygon points=%2724,2 26,4 10,20 6,22 8,18%27 fill=%27%23F2C572%27/%3E%3Cpolygon points=%276,22 3,25 2,24 5,21%27 fill=%27%235B4636%27/%3E%3Cpolygon points=%278,18 6,22 5,21 7,17%27 fill=%27%23171208%27/%3E%3Cpolygon points=%2719,0 28,9 24,13 15,4%27 fill=%27%23E2665B%27/%3E%3C/g%3E%3C/svg%3E') 3 24, crosshair";
+
+  // ---------- "Agrupar (a pé)": draw a shape, bulk-apply walk-only ----------
+  // Same idea as the single-address "Endereços interditos" + parking
+  // point (src/routeGeometry.js's own comment on that pair applies here
+  // too) — this just lets the driver draw a shape around a whole
+  // pedestrian area instead of picking addresses one at a time. Every
+  // address inside the shape still stays its own stop for the optimizer
+  // (own order, own deadline, own status) — only its walk-only flag and
+  // parking point are set, in bulk, via the SAME /api/blocked endpoint
+  // the manual picker already uses.
+  let groupIsDrawing = false; // true strictly between mousedown and mouseup
+  let groupDrawPoints = []; // [[lng,lat], ...] traced during the current drag
+  let groupMatchedAddresses = []; // resolved once the shape closes, awaiting a parking-point click
+  let groupParkingPoint = null; // [lng, lat], set once the parking click lands
 
   // ---------- "Bloquear via" ----------
   // Matches server.js's own default — kept in sync there, not imported,
@@ -87,6 +116,21 @@
   // segment picking, both of which need "how far along the route is X".
   let routeCumulative = null;
   let routeStopMarkers = null;
+
+  // Addresses currently marked walk-only (section 04's list AND "Agrupar
+  // (a pé)" both write to the same server-side list — this is just the
+  // last GET /api/blocked this map has seen). Kept as its own Set,
+  // refreshed by refreshWalkOnlyList(), so buildStopsFeatureCollection
+  // can tag each stop feature without an extra round trip per render.
+  let walkOnlyAddresses = new Set();
+
+  // Master switch for walk-only treatment, next to the "Endereços a pé"
+  // label. Off means every walk-only address is temporarily routed and
+  // drawn like a normal stop, WITHOUT touching data/blocked.json — so
+  // flipping it back on restores everything exactly as it was. Persisted
+  // so it survives a page reload.
+  let walkOnlyEnabled = true;
+  try { walkOnlyEnabled = localStorage.getItem('walkOnlyEnabled') !== '0'; } catch (err) { /* localStorage indisponível */ }
 
   const EMPTY_FC = { type: 'FeatureCollection', features: [] };
 
@@ -153,6 +197,9 @@
   // applyPinStyle() — it never touches map.setStyle()/sources.
   const MODERN_GREY = '#5B6472'; // "before optimizing" / "already visited" — neutral, not a state color
   const MODERN_AMBER = '#E8A33D'; // matches the app's existing amber accent
+  const MODERN_ROUTE_BLUE = '#3B7CF5'; // the un-travelled route line in 'modern' — sampled from the reference "Animar rota" video the user pointed to
+  const MODERN_PROGRESS_GREEN = '#4FAE7C'; // the travelled stretch during "Animar rota" in 'modern' — same green as the moving marker
+  const WALK_ONLY_BLUE = '#5B8FD6'; // same blue as the "Agrupar (a pé)" tool and its list — one colour, one meaning, everywhere: "the van doesn't drive here"
   const DEFAULT_PIN_STYLE = 'classic';
   const PIN_STYLE_STORAGE_KEY = 'routeTrackerPinStyle';
 
@@ -164,6 +211,71 @@
   }
 
   let pinStyle = loadStoredPinStyle();
+
+  // 'modern' style's stop markers: two pin icons from the same icon set
+  // instead of a plain circle — pin-pending.svg while a stop is still
+  // pending, swapped in place for check-pin.svg (the same pin body, plus
+  // a ✓ roundel) once "Animar rota" reaches it. Both multi-colour, so
+  // unlike the circle they replace neither can be recoloured per-feature
+  // via a paint expression (that needs a single-channel SDF image); state
+  // is the swap itself. 512x512 sources, loaded once and reused across
+  // every style switch (map.setStyle() wipes addImage() too, so
+  // addOverlayLayers() re-adds them every time it runs).
+  //
+  // Placement numbers below come from each SVG's own geometry (512x512
+  // viewBox), so a size tweak stays a one-line change:
+  //  - pin-pending.svg: tip at (256, 512), number roundel centred at
+  //    (256, 198.7).
+  //  - check-pin.svg: the same pin drawn at x=198.7 instead of 256 to make
+  //    room for the ✓ roundel off to the bottom-right — so tip at
+  //    (198.7, 512), roundel centred at (198.7, 198.7).
+  const PIN_ICON_SIZE = 0.085; // ~44px tall on screen
+  const PIN_TEXT_SIZE = 11;
+  const PIN_ROUNDEL_ABOVE_TIP = 512 - 198.7; // identical for both pins
+  const PIN_PENDING_IMAGE_ID = 'pin-pending';
+  const CHECK_PIN_IMAGE_ID = 'check-pin';
+  const CHECK_PIN_TIP_RIGHT_OF_CENTER = 256 - 198.676; // tip is left of the image's centre line
+  const mapImageElements = {}; // id -> loaded <img>, filled in as each one's onload fires
+
+  function preloadMapImage(id, url) {
+    if (typeof Image === 'undefined') return; // test harness loads this file with no DOM/Image global
+    const img = new Image();
+    img.onload = () => {
+      mapImageElements[id] = img;
+      if (ensureMapImagesRegistered()) redrawStopsForLateIcons();
+    };
+    img.src = url;
+  }
+  preloadMapImage(PIN_PENDING_IMAGE_ID, '/icons/pin-pending.svg');
+  preloadMapImage(CHECK_PIN_IMAGE_ID, '/icons/check-pin.svg');
+
+  // Registers every loaded image the map doesn't have yet. Also reports
+  // whether anything NEW was added, because a symbol layer whose icon
+  // didn't exist yet when its features were last drawn does NOT pick up
+  // a later addImage() on its own — MapLibre bakes icon placement into
+  // the layer's data at setData() time, so a late-arriving icon (the SVG
+  // fetch losing the race against the very first route render, which is
+  // likely on a real page load: WebGL init + style/tile loading + this
+  // fetch are all happening at once) needs that data re-applied once the
+  // image is finally available. Callers do that redraw themselves (see
+  // the addOverlayLayers()/onload call sites below) — this function only
+  // touches the image manager.
+  function ensureMapImagesRegistered() {
+    if (!map) return false;
+    let addedAny = false;
+    Object.keys(mapImageElements).forEach((id) => {
+      if (!map.hasImage(id)) { map.addImage(id, mapImageElements[id]); addedAny = true; }
+    });
+    return addedAny;
+  }
+
+  // Forces the 'stops' symbol layers to re-lay-out with whatever icons are
+  // registered right now — see ensureMapImagesRegistered()'s comment.
+  // Safe to call whenever: a no-op with no route on screen, and preserves
+  // "Animar rota" progress (uses animationPassedSeqs, not renderStops()).
+  function redrawStopsForLateIcons() {
+    if (map && lastRoute) setSourceData('stops', buildStopsFeatureCollection(lastRoute.stops, animationPassedSeqs));
+  }
 
   function updateMapStyleUI() {
     const group = $('mapStyleGroup');
@@ -195,6 +307,8 @@
       paint: { 'line-color': ['case', ['get', 'unreachable'], '#E2665B', '#4FAE7C'], 'line-width': 4, 'line-dasharray': [1, 1.4] },
     });
 
+    ensureMapImagesRegistered();
+
     map.addSource('stops', { type: 'geojson', data: EMPTY_FC });
     map.addLayer({
       id: 'stops-circle-layer', type: 'circle', source: 'stops',
@@ -210,6 +324,62 @@
         'text-size': 11, 'text-font': ['Open Sans Bold', 'Arial Unicode MS Bold'],
       },
       paint: { 'text-color': '#E8A33D' },
+    });
+
+    // "Moderno" only: the two pin icons (see PIN_PENDING_* / CHECK_PIN_*
+    // above) plus their number, replacing stops-circle-layer/
+    // stops-label-layer above for that style — the layer sets are toggled
+    // by visibility in applyPinStyle (classic keeps the plain circle,
+    // modern shows these). Pending vs visited is a plain swap: the two
+    // layers carry opposite static filters on the feature's `passed`
+    // flag, so the moment markStopPassed() flips it the pending pin
+    // vanishes and the ✓ pin takes its place at the exact same point.
+    //
+    // Both use icon-anchor 'bottom' (plus, for the ✓ pin, an icon-offset
+    // in source px scaled by icon-size) so that each pin's own TIP — not
+    // its image centre — sits on the stop's real coordinate, same as any
+    // teardrop map pin; text then shares that anchor and is pulled up into
+    // the pin's roundel with text-offset (ems of text-size).
+    const pinText = {
+      'text-field': ['case', ['get', 'optimized'], ['to-string', ['get', 'seq']], '●'],
+      'text-size': PIN_TEXT_SIZE,
+      'text-font': ['Open Sans Bold', 'Arial Unicode MS Bold'],
+      'text-offset': [0, -(PIN_ROUNDEL_ABOVE_TIP * PIN_ICON_SIZE) / PIN_TEXT_SIZE],
+      'text-allow-overlap': true,
+    };
+    const pinTextPaint = {
+      'text-color': ['case', ['get', 'walkOnly'], WALK_ONLY_BLUE, '#171D26'],
+      // White halo keeps 2-3 digit numbers readable over the roundel's edge.
+      'text-halo-color': '#FFFFFF',
+      'text-halo-width': 1.5,
+    };
+    map.addLayer({
+      id: 'stops-pin-icon-layer', type: 'symbol', source: 'stops',
+      filter: ['!', ['get', 'passed']],
+      layout: {
+        visibility: 'none',
+        'icon-image': PIN_PENDING_IMAGE_ID,
+        'icon-size': PIN_ICON_SIZE,
+        'icon-anchor': 'bottom',
+        'icon-allow-overlap': true,
+        ...pinText,
+      },
+      paint: pinTextPaint,
+    });
+    map.addLayer({
+      id: 'stops-pin-badge-layer', type: 'symbol', source: 'stops',
+      filter: ['get', 'passed'],
+      layout: {
+        visibility: 'none',
+        'icon-image': CHECK_PIN_IMAGE_ID,
+        'icon-size': PIN_ICON_SIZE,
+        'icon-anchor': 'bottom',
+        'icon-offset': [CHECK_PIN_TIP_RIGHT_OF_CENTER, 0],
+        'icon-allow-overlap': true,
+        'icon-ignore-placement': true,
+        ...pinText,
+      },
+      paint: pinTextPaint,
     });
 
     // "Moderno" only: the departure point drawn distinct from the rest
@@ -247,6 +417,29 @@
       paint: { 'circle-radius': 7, 'circle-color': '#E2665B', 'circle-stroke-width': 2, 'circle-stroke-color': '#fff' },
     });
 
+    // "Agrupar (a pé)": the freehand shape while it's being drawn (line)
+    // and, once closed, its interior (fill) — both fed by the SAME
+    // source, since a fill layer simply has nothing to paint yet while
+    // the geometry is still an open LineString.
+    map.addSource('group-draw', { type: 'geojson', data: EMPTY_FC });
+    map.addLayer({
+      id: 'group-draw-fill-layer', type: 'fill', source: 'group-draw',
+      paint: { 'fill-color': '#5B8FD6', 'fill-opacity': 0.15 },
+    });
+    map.addLayer({
+      id: 'group-draw-line-layer', type: 'line', source: 'group-draw',
+      layout: { 'line-join': 'round', 'line-cap': 'round' },
+      paint: { 'line-color': '#5B8FD6', 'line-width': 3, 'line-dasharray': [2, 1.5] },
+    });
+    // A ring around each stop the closed shape actually matched — drawn
+    // on its own source (not by touching 'stops' itself) so highlighting
+    // a group never risks disturbing the main stop numbering/colouring.
+    map.addSource('group-selected-points', { type: 'geojson', data: EMPTY_FC });
+    map.addLayer({
+      id: 'group-selected-points-layer', type: 'circle', source: 'group-selected-points',
+      paint: { 'circle-radius': 14, 'circle-color': 'rgba(0,0,0,0)', 'circle-stroke-width': 3, 'circle-stroke-color': '#5B8FD6' },
+    });
+
     // "Animar rota": a highlight line traces over the route as a marker
     // travels along it — both fed by the same precomputed cumulative
     // distances (see buildCumulative/pointAtDistance below).
@@ -266,6 +459,25 @@
       },
     });
 
+    // A one-off ring flashed over a stop the instant the animation reaches
+    // it (see pulseStopMarker()) — its own layer so it never has to fight
+    // the main stops layer's own paint expressions. circle-radius/opacity
+    // both carry a transition, so a plain setPaintProperty() eases smoothly
+    // instead of needing a manual per-frame animation loop.
+    map.addSource('animation-pulse', { type: 'geojson', data: EMPTY_FC });
+    map.addLayer({
+      id: 'animation-pulse-layer', type: 'circle', source: 'animation-pulse',
+      paint: {
+        'circle-radius': 8,
+        'circle-radius-transition': { duration: 200 },
+        'circle-color': 'rgba(0,0,0,0)',
+        'circle-stroke-width': 3,
+        'circle-stroke-color': '#4FAE7C',
+        'circle-stroke-opacity': 0,
+        'circle-stroke-opacity-transition': { duration: 200 },
+      },
+    });
+
     applyPinStyle();
   }
 
@@ -280,42 +492,48 @@
   function applyPinStyle() {
     if (!map || !map.getLayer('stops-circle-layer')) return;
     const modern = pinStyle === 'modern';
+    ensureMapImagesRegistered(); // in case an SVG finished loading after this style switch's addOverlayLayers()
 
-    // In 'modern', the shared stops layers skip seq 1 until it's been
-    // visited (start-point-layer draws it instead); in 'classic' every
-    // stop — including seq 1 — always goes through the shared layers.
-    const sharedFilter = modern ? ['any', ['!=', ['get', 'seq'], 1], ['get', 'passed']] : null;
-    map.setFilter('stops-circle-layer', sharedFilter);
-    map.setFilter('stops-label-layer', sharedFilter);
-    map.setFilter('start-point-layer', ['all', ['==', ['get', 'seq'], 1], ['!', ['get', 'passed']]]);
-    map.setLayoutProperty('start-point-layer', 'visibility', modern ? 'visible' : 'none');
+    // 'classic': plain numbered circle, unchanged, every stop including
+    // seq 1. 'modern': the pin icons (stops-pin-icon-layer/-badge-layer)
+    // instead — the two circle layers are simply hidden rather than
+    // repurposed, since a multi-colour icon can't reuse their paint
+    // expressions (see PIN_PENDING_IMAGE_ID's comment above).
+    map.setFilter('stops-circle-layer', null);
+    map.setFilter('stops-label-layer', null);
+    map.setLayoutProperty('stops-circle-layer', 'visibility', modern ? 'none' : 'visible');
+    map.setLayoutProperty('stops-label-layer', 'visibility', modern ? 'none' : 'visible');
+    map.setPaintProperty('stops-circle-layer', 'circle-color', '#171D26');
+    // NB: a 'case' expression is [cond, value, ..., fallback] — the
+    // fallback stands alone, never as a trailing "true, value" pair (an
+    // even argument count fails validation and MapLibre silently drops
+    // the whole setPaintProperty, leaving the previous colour in place).
+    map.setPaintProperty('stops-circle-layer', 'circle-stroke-color', ['case', ['get', 'walkOnly'], WALK_ONLY_BLUE, MODERN_AMBER]);
+    map.setLayoutProperty('stops-label-layer', 'text-field', ['to-string', ['get', 'seq']]);
+    map.setPaintProperty('stops-label-layer', 'text-color', ['case', ['get', 'walkOnly'], WALK_ONLY_BLUE, MODERN_AMBER]);
 
-    map.setPaintProperty('stops-circle-layer', 'circle-color', modern
-      ? ['case', ['get', 'passed'], MODERN_GREY, '#FFFFFF']
-      : '#171D26');
-    map.setPaintProperty('stops-circle-layer', 'circle-stroke-color', modern
-      ? ['case', ['get', 'passed'], MODERN_GREY, ['get', 'optimized'], MODERN_AMBER, MODERN_GREY]
-      : MODERN_AMBER);
-
-    map.setLayoutProperty('stops-label-layer', 'text-field', modern
-      ? ['case', ['get', 'passed'], '✓', ['get', 'optimized'], ['to-string', ['get', 'seq']], '●']
-      : ['to-string', ['get', 'seq']]);
-    map.setPaintProperty('stops-label-layer', 'text-color', modern
-      ? ['case', ['get', 'passed'], '#FFFFFF', ['get', 'optimized'], MODERN_AMBER, MODERN_GREY]
-      : MODERN_AMBER);
+    // Every stop gets a pin, seq 1 included — start-point-layer below (the
+    // old "bigger dot, no number" treatment for the departure point) is
+    // retired in 'modern' in its favour. The pending/visited split is the
+    // pair of static `passed` filters set where the layers are created.
+    map.setLayoutProperty('stops-pin-icon-layer', 'visibility', modern ? 'visible' : 'none');
+    map.setLayoutProperty('stops-pin-badge-layer', 'visibility', modern ? 'visible' : 'none');
+    map.setLayoutProperty('start-point-layer', 'visibility', 'none');
 
     // A leg with no route at all (see renderRoute's doc comment) always
     // wins the colour regardless of pin style — it isn't a real road, so
     // it must never read as just another optimized/unoptimized stretch.
+    // The optimized-route blue below is what "Animar rota" traces over in
+    // green as it goes (see animation-progress-line-layer just below).
     map.setPaintProperty('route-line-layer', 'line-color', modern
-      ? ['case', ['get', 'unreachable'], '#E2665B', ['get', 'optimized'], MODERN_AMBER, MODERN_GREY]
-      : ['case', ['get', 'unreachable'], '#E2665B', true, MODERN_AMBER]);
+      ? ['case', ['get', 'unreachable'], '#E2665B', ['get', 'optimized'], MODERN_ROUTE_BLUE, MODERN_GREY]
+      : ['case', ['get', 'unreachable'], '#E2665B', MODERN_AMBER]);
 
     // The traced "already traveled" highlight during "Animar rota" — white
-    // (today's look) in 'classic', muted grey in 'modern' so the untraveled
-    // rest of the route (still the normal route-line-layer colour showing
-    // through) reads as the "next" leg.
-    map.setPaintProperty('animation-progress-line-layer', 'line-color', modern ? MODERN_GREY : '#ffffff');
+    // (today's look) in 'classic', green in 'modern' (same green as the
+    // moving marker and the ✓ pin's roundel) so the covered stretch reads
+    // as "done" against the still-blue rest of the route.
+    map.setPaintProperty('animation-progress-line-layer', 'line-color', modern ? MODERN_PROGRESS_GREEN : '#ffffff');
 
     updateRouteLineDasharray();
   }
@@ -377,12 +595,35 @@
   }
 
   // ---------- "Animar rota" (stop-to-stop playback) ----------
-  const ANIMATION_BASE_DURATION_MS = 8000; // time to cover the whole route at 1x
+  // Duration scales with the route's real length (see computeAnimationDuration)
+  // instead of a single fixed value — a 2km round and a 200km round used to
+  // take the exact same 8s, which either crawled or blitzed by depending on
+  // the route. MIN/MAX just keep both extremes watchable.
+  const ANIMATION_MIN_DURATION_MS = 8000;
+  const ANIMATION_MAX_DURATION_MS = 120000;
+  const ANIMATION_REFERENCE_SPEED_MPS = 25; // ~90km/h "demo" pace before clamping
   const ANIMATION_DWELL_MS = 900; // pause length at each stop
+  // Camera zoom while following the moving marker never goes tighter/wider
+  // than this, however dense or sparse the stops around it are — mirrors the
+  // maxZoom already used by fitBounds elsewhere (renderRoute/recenterOnRoute).
+  const MIN_ANIMATION_ZOOM = 11;
+  const MAX_ANIMATION_ZOOM = 16;
+  // Below this next-stop distance the camera zooms all the way to
+  // MAX_ANIMATION_ZOOM; beyond it, all the way to MIN_ANIMATION_ZOOM;
+  // linearly interpolated in between.
+  const ANIMATION_ZOOM_NEAR_M = 150;
+  const ANIMATION_ZOOM_FAR_M = 3000;
+  // "Safe zone" for the follow camera, as a fraction of the shorter viewport
+  // dimension — while the animated marker stays within this radius of the
+  // screen centre, the camera holds still; only once it nears the edge does
+  // it ease back to centred, so the map doesn't tremble every frame.
+  const ANIMATION_SAFE_ZONE_RATIO = 0.32;
+  const ANIMATION_CAMERA_EASE_MS = 500;
   let animating = false; // true while frames are actively advancing
   let animationSessionActive = false; // true from "Animar rota" until stop/reset or natural end
   let animationFrameId = null;
   let animationCumulative = null; // precomputed once per route: { coords, distances, total }
+  let animationDurationMs = ANIMATION_MIN_DURATION_MS; // computed once per session by computeAnimationDuration()
   let animationProgress = 0; // meters traveled so far — persists across pause/resume
   let animationSpeed = 1; // multiplier, changed via the speed preset buttons
   let animationLastFrameTime = null;
@@ -396,8 +637,15 @@
   // animation is stopped/reset — lets the person configure before playing
   // instead of the animation starting immediately.
   let animateControlsExpanded = false;
+  // Follow-camera state — separate from the animation timeline itself (the
+  // route keeps progressing at its own pace no matter what the camera does).
+  let animationFollowMode = true;
+  let animationCameraEasing = false; // true while an easeTo() from the safe-zone check is in flight
+  let animationBounds = null; // computed once per session, reused by the initial and final framing
 
   function $(id) { return document.getElementById(id); }
+
+  function clamp(value, min, max) { return Math.min(Math.max(value, min), max); }
 
   function formatDelta(meters, seconds) {
     const km = meters / 1000;
@@ -472,7 +720,15 @@
       if (isWebglInitError(e && e.error)) {
         window.removeEventListener('unhandledrejection', onUnhandledRejection);
         handleMapInitFailure();
+        return;
       }
+      // Having an 'error' listener at all stops MapLibre logging on its
+      // own — so anything else (a rejected layer spec, a bad paint
+      // expression, a missing image) would otherwise vanish without a
+      // trace. Tile/glyph fetch hiccups are routine and noisy, so those
+      // stay quiet; everything else is a real bug worth seeing.
+      const msg = e && e.error && e.error.message;
+      if (msg && !/AJAXError|glyph|tile/i.test(msg)) console.error('[map] ' + msg);
     });
 
     map.addControl(new maplibregl.NavigationControl({ showCompass: false }), 'top-right');
@@ -482,20 +738,49 @@
 
       map.on('click', onMapClick);
 
+      // "Agrupar (a pé)": a freehand drag traces the shape. mousedown/up
+      // gate the drawing session; mousemove keeps firing throughout
+      // (dragPan is disabled for the duration in startGroupDrawing, so it
+      // never competes with the map's own pan gesture). Touch equivalents
+      // for a tablet, same handlers — MapLibre normalises both to the
+      // same {lngLat} shape.
+      map.on('mousedown', onGroupDrawStart);
+      map.on('touchstart', onGroupDrawStart);
+      map.on('mousemove', onGroupDrawMove);
+      map.on('touchmove', onGroupDrawMove);
+      map.on('mouseup', onGroupDrawEnd);
+      map.on('touchend', onGroupDrawEnd);
+
       // Clicking a numbered stop shows its address in a popup — only
       // while idle, so it doesn't fight with "Excluir troço" point-picking
       // (that mode's own onMapClick handler runs regardless of layer).
-      // Circle layer only: the number label sits inside the circle, so
-      // binding both would open two identical popups on one click.
-      map.on('click', 'stops-circle-layer', onStopClick);
-      map.on('mouseenter', 'stops-circle-layer', () => { if (mode === 'idle') map.getCanvas().style.cursor = 'pointer'; });
-      map.on('mouseleave', 'stops-circle-layer', () => { map.getCanvas().style.cursor = ''; });
+      // Circle layer only for 'classic' (the number label sits inside the
+      // circle, so binding both would open two identical popups on one
+      // click); the two 'modern' pin layers each carry their own number,
+      // so they bind directly. Only one set is ever visible at a time.
+      ['stops-circle-layer', 'stops-pin-icon-layer', 'stops-pin-badge-layer'].forEach((layerId) => {
+        map.on('click', layerId, onStopClick);
+        map.on('mouseenter', layerId, () => { if (mode === 'idle') map.getCanvas().style.cursor = 'pointer'; });
+        map.on('mouseleave', layerId, () => { map.getCanvas().style.cursor = ''; });
+      });
 
       // Clicking the drawn route while blocking picks the whole leg
       // (stop → stop) the click landed on.
       map.on('click', 'route-line-layer', onRouteLineClick);
       map.on('mouseenter', 'route-line-layer', () => { if (mode === 'block-line') map.getCanvas().style.cursor = 'crosshair'; });
       map.on('mouseleave', 'route-line-layer', () => { map.getCanvas().style.cursor = ''; });
+
+      // "Animar rota"'s follow camera backs off the moment the driver
+      // touches the map themselves — checked via originalEvent, which
+      // MapLibre only sets on gestures that came from the mouse/touch/wheel,
+      // never on our own fitBounds()/easeTo() calls. Re-armed by clicking
+      // "Centrar rota" (see recenterOnRoute()) rather than a second control.
+      const disableFollowOnUserGesture = (e) => {
+        if (animationSessionActive && e.originalEvent) animationFollowMode = false;
+      };
+      map.on('dragstart', disableFollowOnUserGesture);
+      map.on('zoomstart', disableFollowOnUserGesture);
+      map.on('rotatestart', disableFollowOnUserGesture);
 
       window.removeEventListener('unhandledrejection', onUnhandledRejection);
       mapReadyResolve();
@@ -551,8 +836,52 @@
   // Public "recentre on the route" action — for when the driver has
   // panned/zoomed away (to check a restriction, read a street name, etc.)
   // and wants back without recalculating anything.
+  // ---------- Fullscreen ----------
+  // Purely a CSS switch on #mapSection (see .map-fullscreen in styles.css):
+  // the same map, toolbar, stops panel and restriction lists just take
+  // over the viewport, so an animation or a block being edited carries
+  // on untouched. Nothing is recreated — MapLibre only needs a resize().
+  function isFullscreen() {
+    return document.body.classList.contains('map-fullscreen');
+  }
+
+  function updateFullscreenUI() {
+    const btn = $('mapToolFullscreen');
+    if (!btn) return;
+    btn.textContent = isFullscreen() ? t('mapFullscreenExit') : t('mapFullscreen');
+    btn.classList.toggle('active', isFullscreen());
+  }
+
+  function toggleFullscreen() {
+    document.body.classList.toggle('map-fullscreen');
+    updateFullscreenUI();
+    if (map) {
+      map.resize();
+      // resize() alone keeps the old centre/zoom; a second pass after the
+      // layout settles reframes the route in the new, much larger canvas.
+      setTimeout(() => { map.resize(); if (lastRoute && !animationSessionActive) recenterOnRoute(); }, 50);
+    }
+  }
+
   function recenterOnRoute() {
     if (!map || !lastRoute) return;
+    // Mid-animation, "centrar rota" doubles as the follow camera's own
+    // re-enable switch (section 19 of the animation brief: reuse the
+    // existing mechanism instead of adding a second control) — snapping
+    // back to the moving marker reads better here than framing the whole
+    // route, which recenterOnRoute() otherwise does for the non-animating
+    // case just below.
+    if (animationSessionActive && animationCumulative) {
+      animationFollowMode = true;
+      const { point } = pointAtDistance(animationCumulative, animationProgress, 1);
+      const nextStop = animationStopMarkers[animationNextStopIdx];
+      const nextStopPoint = nextStop ? pointAtDistance(animationCumulative, nextStop.distance, 1).point : null;
+      const distanceToNextStop = nextStopPoint ? haversineMeters(point, nextStopPoint) : null;
+      animationCameraEasing = true;
+      map.easeTo({ center: point, zoom: computeAnimationZoom(distanceToNextStop), duration: 600, essential: true });
+      map.once('moveend', () => { animationCameraEasing = false; });
+      return;
+    }
     const bounds = computeBounds(lastRoute.geometry.coordinates);
     if (bounds) map.fitBounds(bounds, { padding: 48, maxZoom: 15, duration: 600 });
   }
@@ -577,7 +906,10 @@
       features: stops.map((s, i) => ({
         type: 'Feature',
         geometry: { type: 'Point', coordinates: [s.lng, s.lat] },
-        properties: { seq: i + 1, address: s.address, optimized: routeIsOptimized, passed: passedSeqs.has(i + 1) },
+        properties: {
+          seq: i + 1, address: s.address, optimized: routeIsOptimized, passed: passedSeqs.has(i + 1),
+          walkOnly: walkOnlyEnabled && walkOnlyAddresses.has(s.address),
+        },
       })),
     };
   }
@@ -713,6 +1045,58 @@
     } catch (err) { /* mapa continua a funcionar sem a lista */ }
   }
 
+  // Same list "Endereços interditos" (section 04 in the sidebar) already
+  // maintains — mirrored here, right next to "Troços excluídos ativos",
+  // so a walk-only group just created with "Agrupar (a pé)" is visible
+  // (and removable) without leaving the map screen. Shows every walk-only
+  // address, not just ones the drawing tool created — the sidebar picker
+  // and this list are two views of the exact same server-side list.
+  function renderWalkOnlyList(list) {
+    const section = $('walkOnlySection');
+    const box = $('walkOnlyList');
+    if (!section || !box) return;
+    section.style.display = list.length > 0 ? '' : 'none';
+    box.innerHTML = '';
+    list.forEach((b) => {
+      const row = document.createElement('div');
+      row.className = 'alias-list-item';
+      row.innerHTML =
+        '<div><div class="from">🚶 ' + escapeHtml(b.address) + '</div>' +
+        (b.reason ? '<div class="to">' + escapeHtml(b.reason) + '</div>' : '') +
+        (b.parkingPoint ? '<div class="to">🅿️ ' + escapeHtml(b.parkingPoint) + '</div>' : '') +
+        '</div>' +
+        '<button class="alias-remove" data-address="' + escapeHtml(b.address) + '" title="' + escapeHtml(t('aliasRemoveTitle')) + '">✕</button>';
+      box.appendChild(row);
+    });
+    box.querySelectorAll('.alias-remove').forEach((btn) => {
+      btn.addEventListener('click', async (e) => {
+        const address = e.currentTarget.getAttribute('data-address');
+        try {
+          await fetch('/api/blocked', {
+            method: 'DELETE',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ address }),
+          });
+          await refreshWalkOnlyList();
+          if (onBlockedAddressesChanged) onBlockedAddressesChanged({ successCount: 1, total: 1 });
+        } catch (err) { /* a lista fica como estava */ }
+      });
+    });
+  }
+
+  async function refreshWalkOnlyList() {
+    try {
+      const res = await fetch('/api/blocked');
+      const list = res.ok ? await res.json() : [];
+      renderWalkOnlyList(list);
+      walkOnlyAddresses = new Set(list.map((b) => b.address));
+      // Re-tag the markers already on screen — via setSourceData directly
+      // (not renderStops(), which would reset animationPassedSeqs and
+      // undo "Animar rota" progress if this runs mid-animation).
+      if (lastRoute) setSourceData('stops', buildStopsFeatureCollection(lastRoute.stops, animationPassedSeqs));
+    } catch (err) { /* mapa continua a funcionar sem a lista */ }
+  }
+
   // ---------- "Animar rota" ----------
 
   function haversineMeters(a, b) {
@@ -836,8 +1220,11 @@
   function positionAnimationTooltip() {
     if (!animationTooltipEl) return;
     const p = map.project(animationTooltipEl._lngLat);
+    // 'modern' pins stand ~PIN_ICON_SIZE*512 px above the point; lift the
+    // tooltip clear of the pin so it doesn't hide the ✓ swap it announces.
+    const lift = pinStyle === 'modern' ? Math.round(512 * PIN_ICON_SIZE) : 0;
     animationTooltipEl.style.left = p.x + 'px';
-    animationTooltipEl.style.top = p.y + 'px';
+    animationTooltipEl.style.top = (p.y - lift) + 'px';
   }
 
   function hideAnimationTooltip() {
@@ -859,10 +1246,83 @@
     map.on('move', positionAnimationTooltip);
   }
 
+  // Route length at 1x -> a watchable duration, clamped so a short hop
+  // doesn't blink by and a cross-country round doesn't take minutes.
+  function computeAnimationDuration(totalMeters) {
+    const rawMs = (totalMeters / ANIMATION_REFERENCE_SPEED_MPS) * 1000;
+    return clamp(rawMs, ANIMATION_MIN_DURATION_MS, ANIMATION_MAX_DURATION_MS);
+  }
+
+  // Bounds for the initial and final framing — the route geometry alone can
+  // miss a stop set slightly off the road (a building set back from it), so
+  // every stop's own coordinate is folded in too.
+  function computeAnimationBounds() {
+    const coords = animationCumulative.coords.concat(lastRoute.stops.map((s) => [s.lng, s.lat]));
+    return computeBounds(coords);
+  }
+
+  // Nearer next stop -> tighter zoom (streets/marker clearly readable);
+  // farther next stop -> wider zoom (the upcoming stretch stays in view).
+  // Always within [MIN_ANIMATION_ZOOM, MAX_ANIMATION_ZOOM] — never the
+  // "zoom=18 just because stops are close together" the driver would hate.
+  function computeAnimationZoom(distanceToNextStop) {
+    if (distanceToNextStop == null) return clamp(map.getZoom(), MIN_ANIMATION_ZOOM, MAX_ANIMATION_ZOOM);
+    const t = clamp(
+      1 - (distanceToNextStop - ANIMATION_ZOOM_NEAR_M) / (ANIMATION_ZOOM_FAR_M - ANIMATION_ZOOM_NEAR_M),
+      0, 1
+    );
+    return MIN_ANIMATION_ZOOM + t * (MAX_ANIMATION_ZOOM - MIN_ANIMATION_ZOOM);
+  }
+
+  // Follow camera: holds still while the animated marker is within a "safe
+  // zone" around screen centre, and only eases (never snaps) back to
+  // centred once it nears the edge — checked, not applied, every frame, so
+  // a route with hundreds of stops doesn't trigger a pan on every single
+  // one. Independent of the animation timeline itself (section 18 of the
+  // brief this implements): the route keeps progressing at its own pace
+  // regardless of what the camera is doing.
+  function updateAnimationCamera(position, nextStopPoint) {
+    if (!animationFollowMode || animationCameraEasing || !map) return;
+    const container = map.getContainer();
+    const w = container.clientWidth;
+    const h = container.clientHeight;
+    if (!w || !h) return;
+    const safeRadius = Math.min(w, h) * ANIMATION_SAFE_ZONE_RATIO;
+    const screenPoint = map.project(position);
+    const dx = screenPoint.x - w / 2;
+    const dy = screenPoint.y - h / 2;
+    if (Math.sqrt(dx * dx + dy * dy) <= safeRadius) return; // still inside the safe zone — hold the camera
+
+    const distanceToNextStop = nextStopPoint ? haversineMeters(position, nextStopPoint) : null;
+    const targetZoom = computeAnimationZoom(distanceToNextStop);
+    animationCameraEasing = true;
+    map.easeTo({ center: position, zoom: targetZoom, duration: ANIMATION_CAMERA_EASE_MS, essential: true });
+    map.once('moveend', () => { animationCameraEasing = false; });
+  }
+
+  // A brief ring flash at the exact moment the line reaches a stop — grows
+  // then settles back down over ~300ms via the layer's own paint
+  // transitions (see addOverlayLayers), so this just sets two values a
+  // beat apart instead of running its own animation loop.
+  function pulseStopMarker(point) {
+    if (!map) return;
+    setSourceData('animation-pulse', { type: 'Feature', geometry: { type: 'Point', coordinates: point }, properties: {} });
+    map.setPaintProperty('animation-pulse-layer', 'circle-radius', 8);
+    map.setPaintProperty('animation-pulse-layer', 'circle-stroke-opacity', 0.9);
+    requestAnimationFrame(() => {
+      map.setPaintProperty('animation-pulse-layer', 'circle-radius', 22);
+      setTimeout(() => {
+        map.setPaintProperty('animation-pulse-layer', 'circle-radius', 8);
+        map.setPaintProperty('animation-pulse-layer', 'circle-stroke-opacity', 0);
+      }, 200);
+    });
+  }
+
   function beginDwell(stop) {
     if (animationFrameId !== null) { cancelAnimationFrame(animationFrameId); animationFrameId = null; }
     const { point } = pointAtDistance(animationCumulative, stop.distance, 1);
     markStopPassed(stop.seq);
+    pulseStopMarker(point);
     showAnimationTooltip(stop.seq, stop.address, point);
     animationDwellTimeoutId = setTimeout(() => {
       animationDwellTimeoutId = null;
@@ -877,12 +1337,19 @@
     const deltaSeconds = (now - animationLastFrameTime) / 1000;
     animationLastFrameTime = now;
 
-    const baseSpeedMps = animationCumulative.total / (ANIMATION_BASE_DURATION_MS / 1000);
+    const baseSpeedMps = animationCumulative.total / (animationDurationMs / 1000);
     animationProgress = Math.min(animationProgress + baseSpeedMps * animationSpeed * deltaSeconds, animationCumulative.total);
 
     const { point, slicedCoords } = pointAtDistance(animationCumulative, animationProgress, 1);
     setSourceData('animation-progress-line', { type: 'Feature', geometry: { type: 'LineString', coordinates: slicedCoords }, properties: {} });
     setSourceData('animation-marker', { type: 'Feature', geometry: { type: 'Point', coordinates: point }, properties: {} });
+
+    // Camera timeline stays entirely separate from the route timeline
+    // above — it only ever reads the position just computed, never slows
+    // or speeds up the animation itself.
+    const nextStop = animationStopMarkers[animationNextStopIdx];
+    const nextStopPoint = nextStop ? pointAtDistance(animationCumulative, nextStop.distance, 1).point : null;
+    updateAnimationCamera(point, nextStopPoint);
 
     if (animationNextStopIdx < animationStopMarkers.length
         && animationProgress >= animationStopMarkers[animationNextStopIdx].distance) {
@@ -893,6 +1360,10 @@
     }
 
     if (animationProgress >= animationCumulative.total) {
+      // A last gentle look at the whole route before the usual cleanup —
+      // fitBounds() itself just kicks off a map-level tween, so it's safe
+      // to let stopAnimation() null out our own bookkeeping right after.
+      if (animationBounds) map.fitBounds(animationBounds, { padding: 80, maxZoom: MAX_ANIMATION_ZOOM, duration: 800 });
       stopAnimation(); // also clears the traced line and the moving marker
       return;
     }
@@ -913,10 +1384,14 @@
     animationNextStopIdx = 0;
     animationLastFrameTime = null;
     animateControlsExpanded = false;
+    animationFollowMode = true;
+    animationCameraEasing = false;
+    animationBounds = null;
     hideAnimationTooltip();
     if (map) {
       setSourceData('animation-progress-line', EMPTY_FC);
       setSourceData('animation-marker', EMPTY_FC);
+      setSourceData('animation-pulse', EMPTY_FC);
       if (lastRoute) renderStops(lastRoute.stops); // clears any grey/checkmarked "passed" stops from 'modern' style
     }
     updateAnimationUI();
@@ -934,8 +1409,25 @@
     animateControlsExpanded = true;
     animationSessionActive = true;
     animating = true;
+    animationFollowMode = true;
+    animationCameraEasing = false;
+    animationDurationMs = computeAnimationDuration(animationCumulative.total);
+    animationBounds = computeAnimationBounds();
     updateAnimationUI();
-    animationFrameId = requestAnimationFrame(animationStep);
+
+    // Frame the whole route first (section 3 of the brief this implements)
+    // and only start drawing once that settles, so the line doesn't begin
+    // mid-zoom. Falls back to starting immediately if there's nothing to
+    // fit (shouldn't happen with a real route, but ensureRouteMetrics()
+    // already guards the geometry-less case above).
+    if (animationBounds) {
+      map.once('moveend', () => {
+        if (animationSessionActive && animating) animationFrameId = requestAnimationFrame(animationStep);
+      });
+      map.fitBounds(animationBounds, { padding: 80, maxZoom: MAX_ANIMATION_ZOOM, duration: 800 });
+    } else {
+      animationFrameId = requestAnimationFrame(animationStep);
+    }
   }
 
   function pauseAnimation() {
@@ -971,14 +1463,26 @@
     const blocking = blockPanelOpen || mode !== 'idle';
     $('mapToolSelect').classList.toggle('active', !blocking);
     $('mapToolExclude').classList.toggle('active', blocking);
+    $('mapToolGroupWalk').classList.toggle('active', mode === 'group-draw' || mode === 'group-parking');
     const hint = $('mapHint');
     const hintKey = mode === 'block-line' ? 'mapHintPickLine'
       : mode === 'exclude-a' ? 'mapHintPickA'
       : mode === 'exclude-b' ? 'mapHintPickB'
       : mode === 'access-point' ? 'mapHintPickAccessPoint'
+      : mode === 'group-draw' ? 'mapHintGroupDraw'
+      : mode === 'group-parking' ? 'mapHintGroupParking'
       : null;
     hint.style.display = hintKey ? '' : 'none';
     if (hintKey) hint.textContent = t(hintKey);
+
+    // The pencil only while actually drawing; every other point-picking
+    // mode keeps the plain crosshair it already had (set here too, since
+    // those modes span the whole map, not one hoverable layer).
+    if (map) {
+      map.getCanvas().style.cursor = mode === 'group-draw' ? PENCIL_CURSOR
+        : (mode === 'exclude-a' || mode === 'exclude-b' || mode === 'access-point' || mode === 'group-parking') ? 'crosshair'
+        : '';
+    }
   }
 
   function resetPicking() {
@@ -992,14 +1496,167 @@
     pendingPreview = null;
     blockAnchorPoint = null;
     pendingAccessOverrideAddress = null;
+    groupIsDrawing = false;
+    groupDrawPoints = [];
+    groupMatchedAddresses = [];
+    groupParkingPoint = null;
+    if (map && map.dragPan && !map.dragPan.isEnabled()) map.dragPan.enable();
     setSourceData('pick-points', EMPTY_FC);
     setSourceData('preview-route-line', EMPTY_FC);
+    setSourceData('group-draw', EMPTY_FC);
+    setSourceData('group-selected-points', EMPTY_FC);
     // Redraw the blocked-segment overlay from what is actually in force:
     // picking a segment draws a draft 🚧 line, and abandoning the flow
     // must not leave that draft behind on a road nobody blocked.
     renderExcludedSegments(inForceRestrictions);
     hideComparisonPanel();
     updateToolbarUI();
+  }
+
+  // ---------- "Agrupar (a pé)": draw a shape, bulk-apply walk-only ----------
+
+  function startGroupDrawing() {
+    if (!lastRoute) return;
+    stopAnimation();
+    mode = 'group-draw';
+    groupIsDrawing = false;
+    groupDrawPoints = [];
+    groupMatchedAddresses = [];
+    groupParkingPoint = null;
+    setSourceData('group-draw', EMPTY_FC);
+    setSourceData('group-selected-points', EMPTY_FC);
+    setSourceData('pick-points', EMPTY_FC);
+    hideComparisonPanel();
+    // The map's own pan-by-dragging has to get out of the way for the
+    // drag gesture to draw a shape instead of just scrolling the map.
+    map.dragPan.disable();
+    updateToolbarUI();
+  }
+
+  function renderGroupDrawShape() {
+    if (groupDrawPoints.length < 2) {
+      setSourceData('group-draw', EMPTY_FC);
+      return;
+    }
+    // A LineString while there are too few points for a meaningful area,
+    // otherwise a closed ring (first point repeated at the end) so the
+    // fill layer actually has something to paint as the driver draws.
+    const closed = groupDrawPoints.length >= 3 ? groupDrawPoints.concat([groupDrawPoints[0]]) : groupDrawPoints;
+    const geometry = groupDrawPoints.length >= 3
+      ? { type: 'Polygon', coordinates: [closed] }
+      : { type: 'LineString', coordinates: groupDrawPoints };
+    setSourceData('group-draw', { type: 'Feature', geometry, properties: {} });
+  }
+
+  function onGroupDrawStart(e) {
+    if (mode !== 'group-draw') return;
+    groupIsDrawing = true;
+    groupDrawPoints = [[e.lngLat.lng, e.lngLat.lat]];
+  }
+
+  function onGroupDrawMove(e) {
+    if (mode !== 'group-draw' || !groupIsDrawing) return;
+    groupDrawPoints.push([e.lngLat.lng, e.lngLat.lat]);
+    renderGroupDrawShape();
+  }
+
+  function onGroupDrawEnd() {
+    if (mode !== 'group-draw' || !groupIsDrawing) return;
+    groupIsDrawing = false;
+    map.dragPan.enable();
+    finishGroupShape();
+  }
+
+  // A shape too small/short to have been a deliberate drag (an accidental
+  // click-and-release with barely any movement) is treated the same as
+  // never having drawn one at all — no confusing "0 addresses" message
+  // for what was really just a mis-click.
+  const MIN_GROUP_SHAPE_POINTS = 3;
+
+  function finishGroupShape() {
+    if (groupDrawPoints.length < MIN_GROUP_SHAPE_POINTS) {
+      resetPicking();
+      return;
+    }
+
+    const stops = lastRoute ? lastRoute.stops : [];
+    groupMatchedAddresses = stops
+      .filter((s) => pointInPolygon([s.lng, s.lat], groupDrawPoints))
+      .map((s) => s.address);
+    setSourceData('group-draw', EMPTY_FC); // the outline itself has done its job once we know who's inside it
+
+    if (groupMatchedAddresses.length === 0) {
+      mode = 'idle';
+      updateToolbarUI();
+      showErrorPanel(t('groupWalkNoMatches'));
+      return;
+    }
+
+    setSourceData('group-selected-points', {
+      type: 'FeatureCollection',
+      features: stops
+        .filter((s) => groupMatchedAddresses.includes(s.address))
+        .map((s) => ({ type: 'Feature', geometry: { type: 'Point', coordinates: [s.lng, s.lat] }, properties: {} })),
+    });
+
+    mode = 'group-parking';
+    updateToolbarUI();
+  }
+
+  function showConfirmGroupWalkPanel() {
+    const list = groupMatchedAddresses.map((a) => '<li>' + escapeHtml(a) + '</li>').join('');
+    showComparisonPanel(
+      '<div class="totals-panel">' +
+        '<p style="margin:0 0 10px;color:var(--text);font-size:14px;">' +
+          escapeHtml(t('groupWalkConfirmQuestion', { count: groupMatchedAddresses.length })) +
+        '</p>' +
+        '<ul style="margin:0 0 14px;padding-left:20px;color:var(--text-dim);font-size:13px;">' + list + '</ul>' +
+        '<div class="map-comparison-actions">' +
+          '<button class="btn-ghost" id="mapCancelGroupWalkBtn">' + escapeHtml(t('cancelBtn')) + '</button>' +
+          '<button class="btn-primary" id="mapConfirmGroupWalkBtn" style="width:auto;">' + escapeHtml(t('groupWalkConfirmBtn')) + '</button>' +
+        '</div>' +
+      '</div>'
+    );
+    $('mapCancelGroupWalkBtn').addEventListener('click', resetPicking);
+    $('mapConfirmGroupWalkBtn').addEventListener('click', applyGroupWalkOnly);
+  }
+
+  // Same endpoint the single-address "Endereços interditos" picker
+  // already uses (POST /api/blocked) — this just calls it once per
+  // matched address, all with the same parking point, instead of the
+  // person doing that by hand one address at a time. Coordinates (not
+  // an address string) as the parking point, so the server never has to
+  // geocode it — see the isCoord check in server.js's own handler.
+  async function applyGroupWalkOnly() {
+    const [lng, lat] = groupParkingPoint;
+    const parkingPoint = `${lat},${lng}`;
+    const addresses = groupMatchedAddresses;
+
+    hideComparisonPanel();
+    let successCount = 0;
+    try {
+      const results = await Promise.all(addresses.map((address) =>
+        fetch('/api/blocked', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ address, reason: t('groupWalkReasonDefault'), parkingPoint }),
+        }).then((res) => res.ok).catch(() => false)
+      ));
+      successCount = results.filter(Boolean).length;
+    } catch (err) {
+      successCount = 0;
+    }
+
+    resetPicking();
+    // The map's OWN list ("Endereços a pé", right on this screen) is what
+    // actually confirms the group took effect without having to go look
+    // at the sidebar — refreshed here directly, unlike the sidebar/banner
+    // below, which map.js never touches itself.
+    await refreshWalkOnlyList();
+    // Section 04's picker, the address list's 🚶 tags, and the top status
+    // banner all belong to index.html — map.js never touches any of that
+    // directly, so the outcome is handed back up instead of shown here.
+    if (onBlockedAddressesChanged) onBlockedAddressesChanged({ successCount, total: addresses.length });
   }
 
   // ---------- Picking the segment to block ----------
@@ -1212,6 +1869,23 @@
     return tied.reduce((closest, f) => (f.properties.seq < closest.properties.seq ? f : closest));
   }
 
+  // Ray-casting point-in-polygon: for the "draw a shape, group the
+  // addresses inside it" tool — works for whatever shape a freehand drag
+  // happens to produce (concave included), never assumes a rectangle or
+  // convex hull. `polygon` need not be explicitly closed (the loop wraps
+  // from the last point back to the first on its own).
+  function pointInPolygon(point, polygon) {
+    const [x, y] = point;
+    let inside = false;
+    for (let i = 0, j = polygon.length - 1; i < polygon.length; j = i++) {
+      const [xi, yi] = polygon[i];
+      const [xj, yj] = polygon[j];
+      const crosses = (yi > y) !== (yj > y) && x < ((xj - xi) * (y - yi)) / (yj - yi) + xi;
+      if (crosses) inside = !inside;
+    }
+    return inside;
+  }
+
   function onStopClick(e) {
     if (mode !== 'idle') return; // "Bloquear via" picking takes priority
     if (!e.features || !e.features.length) return;
@@ -1231,6 +1905,15 @@
     }
 
     const point = [e.lngLat.lng, e.lngLat.lat];
+
+    if (mode === 'group-parking') {
+      groupParkingPoint = point;
+      setSourceData('pick-points', { type: 'FeatureCollection', features: [{ type: 'Feature', geometry: { type: 'Point', coordinates: point }, properties: {} }] });
+      mode = 'idle';
+      updateToolbarUI();
+      showConfirmGroupWalkPanel();
+      return;
+    }
 
     if (mode === 'exclude-a') {
       pickedA = point;
@@ -1722,6 +2405,7 @@
         // block that fails every route becomes impossible to remove from
         // the UI at all.
         await refreshActiveRestrictions();
+        await refreshWalkOnlyList();
         return;
       }
 
@@ -1739,6 +2423,7 @@
       renderRoute(lastRoute, !params.preserveView);
       renderStops(lastRoute.stops);
       await refreshActiveRestrictions();
+      await refreshWalkOnlyList();
     } catch (err) {
       $('mapEmptyState').style.display = '';
       $('mapEmptyState').textContent = t('serverContactError');
@@ -1852,16 +2537,33 @@
     updatePreOptimizeButtonUI();
     updateToolbarUI();
     updateAnimationUI();
+    updateFullscreenUI();
     if (lastRequestParams) refreshActiveRestrictions();
   }
 
   function init(deps) {
     t = deps.t || t;
     escapeHtml = deps.escapeHtml || escapeHtml;
+    onBlockedAddressesChanged = deps.onBlockedAddressesChanged || null;
+    onWalkOnlyEnabledChanged = deps.onWalkOnlyEnabledChanged || null;
+
+    const walkOnlyToggle = $('walkOnlyEnabledToggle');
+    if (walkOnlyToggle) {
+      walkOnlyToggle.checked = walkOnlyEnabled;
+      walkOnlyToggle.addEventListener('change', (e) => {
+        walkOnlyEnabled = e.target.checked;
+        try { localStorage.setItem('walkOnlyEnabled', walkOnlyEnabled ? '1' : '0'); } catch (err) { /* localStorage indisponível */ }
+        if (lastRoute) setSourceData('stops', buildStopsFeatureCollection(lastRoute.stops, animationPassedSeqs));
+        if (onWalkOnlyEnabledChanged) onWalkOnlyEnabledChanged(walkOnlyEnabled);
+      });
+    }
 
     $('mapToolSelect').addEventListener('click', () => { stopAnimation(); resetPicking(); });
     $('mapToolExclude').addEventListener('click', openBlockPanel);
+    $('mapToolGroupWalk').addEventListener('click', startGroupDrawing);
     $('mapToolRecenter').addEventListener('click', recenterOnRoute);
+    $('mapToolFullscreen').addEventListener('click', toggleFullscreen);
+    document.addEventListener('keydown', (e) => { if (e.key === 'Escape' && isFullscreen()) toggleFullscreen(); });
     // First click just reveals the speed/pin-style controls + "▶ Play"
     // (see updateAnimationUI()) instead of starting the animation right
     // away; once a session is active this same button doubles as
@@ -1906,6 +2608,7 @@
     __test: {
       buildCumulative, pointAtDistance, computeStopMarkers,
       sliceCoordsBetween, legEndForDistance, pickClosestFeature,
+      pointInPolygon, computeAnimationDuration, computeAnimationZoom,
     },
   };
 })();

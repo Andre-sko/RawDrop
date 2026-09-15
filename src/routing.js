@@ -309,11 +309,23 @@ async function buildDurationMatrix(locations, mode) {
 // /api/optimize in server.js) can get the same walk-only treatment
 // instead of silently ignoring restrictedFlags whenever Valhalla is the
 // one computing distances.
-async function overlayWalkingMatrix(drivingMatrix, locations, restrictedFlags) {
+//
+// walkingMatrixOverride (optional): use this matrix instead of computing
+// one via buildDurationMatrix(locations, "walking"). server.js passes one
+// built with Valhalla's pedestrian costing when it has a Valhalla
+// instance configured — this module can't call Valhalla itself (it's the
+// other way around: src/valhalla.js already imports FROM here, so the
+// reverse import would be circular), but without SOME alternative,
+// ROUTING_SOURCE=osrm with no reachable walking OSRM instance had only
+// Google left to fall back to — and a route with no working Google key
+// (a real, common setup once OSRM is doing the actual routing) then
+// failed outright instead of degrading, for every route with a
+// walk-only stop.
+async function overlayWalkingMatrix(drivingMatrix, locations, restrictedFlags, walkingMatrixOverride) {
   const anyRestricted = restrictedFlags.some(Boolean);
   if (!anyRestricted) return drivingMatrix;
 
-  const walkingMatrix = await buildDurationMatrix(locations, "walking");
+  const walkingMatrix = walkingMatrixOverride || await buildDurationMatrix(locations, "walking");
   const n = locations.length;
   const merged = Array.from({ length: n }, () => new Array(n).fill(Infinity));
 
@@ -332,9 +344,9 @@ async function overlayWalkingMatrix(drivingMatrix, locations, restrictedFlags) {
 // walk-only, it uses the walking-mode duration instead of the normal
 // van mode. Google only accepts ONE mode per request, so we build both
 // complete matrices (driving and walking) and then choose cell by cell.
-async function buildMixedDurationMatrix(locations, mode, restrictedFlags) {
+async function buildMixedDurationMatrix(locations, mode, restrictedFlags, walkingMatrixOverride) {
   const drivingMatrix = await buildDurationMatrix(locations, mode);
-  return overlayWalkingMatrix(drivingMatrix, locations, restrictedFlags);
+  return overlayWalkingMatrix(drivingMatrix, locations, restrictedFlags, walkingMatrixOverride);
 }
 
 module.exports = {

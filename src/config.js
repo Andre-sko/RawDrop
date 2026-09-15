@@ -107,6 +107,22 @@ const GEOCODE_CACHE_FILE = path.join(DATA_DIR, "geocode-cache.json");
 const DISTANCE_CACHE_FILE = path.join(DATA_DIR, "distance-cache.json");
 const ROAD_RESTRICTIONS_FILE = path.join(DATA_DIR, "road-restrictions.json");
 const ACCESS_OVERRIDES_FILE = path.join(DATA_DIR, "access-overrides.json");
+const ROUTE_SHARES_FILE = path.join(DATA_DIR, "route-shares.json");
+const FUEL_SETTINGS_FILE = path.join(DATA_DIR, "fuel-settings.json");
+
+// Live fuel price (see src/fuel.js). Defaults point at the French
+// government's open station-price feed and the ECB-rate service, both
+// free and keyless; override in .env only if you self-host a mirror or
+// they ever move. FUEL_PRICE_RADIUS_KM / FUEL_PRICE_STATIONS: how far
+// from the route's start to look, and how many of the nearest stations
+// to average. FUEL_CURRENCY: what the estimate is shown in (EUR skips
+// the conversion entirely).
+const FUEL_PRICE_API_URL = (process.env.FUEL_PRICE_API_URL
+  || "https://data.economie.gouv.fr/api/explore/v2.1/catalog/datasets/prix-des-carburants-en-france-flux-instantane-v2/records").trim();
+const FUEL_PRICE_RADIUS_KM = Number(process.env.FUEL_PRICE_RADIUS_KM || 80);
+const FUEL_PRICE_STATIONS = Number(process.env.FUEL_PRICE_STATIONS || 10);
+const FUEL_FX_API_URL = (process.env.FUEL_FX_API_URL || "https://api.frankfurter.dev/v1/latest").trim();
+const FUEL_CURRENCY = (process.env.FUEL_CURRENCY || "CHF").trim().toUpperCase();
 
 // AI engine (Claude vision) for "Video → Address" — optional. Without
 // ANTHROPIC_API_KEY, the app still works, just with only the "local"
@@ -147,6 +163,13 @@ module.exports = {
   DISTANCE_CACHE_FILE,
   ROAD_RESTRICTIONS_FILE,
   ACCESS_OVERRIDES_FILE,
+  ROUTE_SHARES_FILE,
+  FUEL_SETTINGS_FILE,
+  FUEL_PRICE_API_URL,
+  FUEL_PRICE_RADIUS_KM,
+  FUEL_PRICE_STATIONS,
+  FUEL_FX_API_URL,
+  FUEL_CURRENCY,
   ANTHROPIC_MODEL,
   anthropic,
 };

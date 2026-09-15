@@ -402,14 +402,14 @@ async function valhallaRouteAllowingGaps(locations, { excludePolygons } = {}) {
 // same shape/role as osrmDurationMatrix in src/routing.js, but with
 // exclude_polygons support so a road-segment exclusion is honoured
 // while re-optimizing stop order (src/optimizer.js consumes this).
-async function valhallaMatrix(locations, { excludePolygons } = {}) {
+async function valhallaMatrix(locations, { excludePolygons, costing = "auto" } = {}) {
   const coords = await resolveLocations(locations);
   const valhallaLocations = coords.map((c) => ({ lat: c.lat, lon: c.lng }));
 
   const data = await valhallaFetch("/sources_to_targets", {
     sources: valhallaLocations,
     targets: valhallaLocations,
-    costing: "auto",
+    costing,
     exclude_polygons: excludePolygonsPayload(excludePolygons),
   });
 
