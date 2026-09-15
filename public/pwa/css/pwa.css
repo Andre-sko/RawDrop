@@ -380,3 +380,138 @@ button, input {
   z-index: 100;
 }
 #loadingOverlay[hidden] { display: none; }
+
+/* Language selector: on the scanner screen next to the title, in the list
+   header next to the rescan button. Same storage key as the office app. */
+.scanner-top { display: flex; align-items: center; justify-content: space-between; gap: 12px; }
+.scanner-top h1 { margin: 0; }
+.lang-select {
+  background: var(--panel);
+  color: var(--text);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 8px 10px;
+  font-size: 14px;
+  flex-shrink: 0;
+}
+
+/* ---------- Live tracking (map screen) ---------- */
+
+/* Next-stop bar across the top of the map: number, address, distance /
+   ETA from the observed speed. Tapping it opens that stop's modal. */
+.next-stop-bar {
+  position: absolute;
+  top: 10px; left: 10px; right: 58px;
+  z-index: 5;
+  background: rgba(23, 29, 38, 0.94);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 8px 12px;
+  cursor: pointer;
+  box-shadow: 0 4px 14px rgba(0,0,0,0.35);
+}
+.next-stop-label { font-size: 11px; letter-spacing: 0.08em; text-transform: uppercase; color: var(--muted); }
+.next-stop-main { display: flex; align-items: center; gap: 8px; margin: 2px 0; }
+.next-stop-num {
+  flex: 0 0 auto;
+  width: 26px; height: 26px; border-radius: 50%;
+  background: var(--accent); color: #171208;
+  font-weight: 800; font-size: 13px;
+  display: flex; align-items: center; justify-content: center;
+}
+.next-stop-addr { font-weight: 600; font-size: 14px; line-height: 1.2; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.next-stop-detail { font-size: 13px; color: var(--muted); }
+.next-stop-dist { color: var(--text); font-weight: 600; }
+.next-stop-done { font-weight: 600; color: var(--ok); }
+
+/* The driver: blue dot with a heading wedge that only shows when the
+   phone reports a bearing (i.e. while actually moving). */
+.map-me { width: 44px; height: 44px; position: relative; }
+.map-me-dot {
+  position: absolute; left: 13px; top: 13px;
+  width: 18px; height: 18px; border-radius: 50%;
+  background: #4C9EFF; border: 3px solid #fff;
+  box-shadow: 0 0 0 6px rgba(76,158,255,0.25);
+}
+.map-me-heading {
+  display: none;
+  position: absolute; left: 50%; top: -2px;
+  width: 0; height: 0; margin-left: -9px;
+  border-left: 9px solid transparent; border-right: 9px solid transparent;
+  border-bottom: 16px solid rgba(76,158,255,0.9);
+}
+.map-me.has-heading .map-me-heading { display: block; }
+.map-locate-btn.active { background: #4C9EFF; color: #fff; }
+
+/* Card extras: walk-only badge, and the alias target under the address. */
+.walk-badge {
+  display: inline-flex; align-items: center; gap: 3px;
+  font-size: 12px; padding: 3px 8px; border-radius: 999px;
+  background: rgba(91,143,214,0.18); color: #8FB4E8;
+}
+.stop-routed-as { font-size: 12px; color: var(--muted); margin-top: 2px; font-family: ui-monospace, monospace; }
+
+/* ---------- Settings modal ---------- */
+.setting-row {
+  display: flex; align-items: center; justify-content: space-between; gap: 14px;
+  padding: 12px 0; border-bottom: 1px solid var(--border);
+}
+.setting-row:last-of-type { border-bottom: none; }
+.setting-label { font-weight: 600; display: block; }
+.setting-hint { display: block; font-size: 12px; color: var(--muted); margin-top: 2px; }
+.setting-toggle input[type="checkbox"] {
+  flex: 0 0 auto;
+  width: 46px; height: 26px; appearance: none; -webkit-appearance: none;
+  background: var(--border); border-radius: 999px; position: relative; cursor: pointer;
+  transition: background 0.15s;
+}
+.setting-toggle input[type="checkbox"]::after {
+  content: ""; position: absolute; top: 3px; left: 3px; width: 20px; height: 20px;
+  border-radius: 50%; background: #fff; transition: left 0.15s;
+}
+.setting-toggle input[type="checkbox"]:checked { background: var(--ok); }
+.setting-toggle input[type="checkbox"]:checked::after { left: 23px; }
+
+/* ---------- Rugged-phone tuning (Galaxy XCover 7 class: 412x892 CSS px,
+   gloves, sunlight, sometimes mounted sideways in the van) ---------- */
+
+/* Glove-sized targets everywhere: 48px is the floor for anything tappable. */
+.stop-meta .icon-btn { min-width: 48px; min-height: 48px; font-size: 18px; }
+.icon-btn-header { min-width: 48px; min-height: 48px; }
+.lang-select { min-height: 48px; font-size: 16px; }
+.maplibregl-ctrl-group button { width: 48px !important; height: 48px !important; }
+.maplibregl-ctrl-group button .maplibregl-ctrl-icon { transform: scale(1.35); }
+.maplibregl-ctrl-top-right .maplibregl-ctrl { margin: 10px 10px 0 0; }
+/* Any 16px+ input stops Android/iOS from zooming the page on focus. */
+input, select, button { font-size: max(16px, 1em); }
+
+/* Attribution: MapLibre's compact ⓘ (tap to expand), kept clear of the
+   🎯 button. The full text still shows on tap, as the tile licence wants. */
+.maplibregl-ctrl-bottom-right { right: 74px; }
+.maplibregl-ctrl-attrib.maplibregl-compact { min-height: 24px; }
+
+/* Next-stop bar leaves room for the (now bigger) zoom control. */
+.next-stop-bar { right: 70px; }
+
+/* Sunlight: a touch more contrast on the things read while driving. */
+.next-stop-addr { font-size: 15px; }
+.next-stop-detail { font-size: 14px; }
+.next-stop-dist { font-size: 15px; }
+.stop-address { font-size: 17px; }
+
+/* Landscape (short and wide): shrink the chrome, use the width. */
+@media (orientation: landscape) and (max-height: 500px) {
+  .list-header { padding: 8px 12px 6px; }
+  .counter { padding: 6px 10px; }
+  .counter .num { font-size: 20px; }
+  .counter .lbl { font-size: 11px; }
+  #bottomNav .nav-btn { min-height: 44px; flex-direction: row; gap: 8px; }
+  #bottomNav .nav-btn .nav-icon { font-size: 18px; }
+  /* Two cards per row, so a short screen still shows 3-4 stops. */
+  #listScreen .stop-section { display: flex; flex-wrap: wrap; gap: 10px; align-content: flex-start; }
+  #listScreen .stop-section > .stop-card { flex: 1 1 calc(50% - 5px); min-width: 300px; margin: 0; }
+  #listScreen .stop-section > .empty-hint { flex: 1 1 100%; }
+  .next-stop-bar { right: auto; max-width: 480px; }
+  .map-locate-btn { bottom: 12px; }
+  .maplibregl-ctrl-bottom-right { right: 74px; }
+}

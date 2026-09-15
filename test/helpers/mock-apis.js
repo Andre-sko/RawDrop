@@ -95,6 +95,9 @@ global.fetch = async (url, ...rest) => {
 
   if (raw.endsWith("/route") || raw.endsWith("/sources_to_targets")) {
     record("valhalla");
+    // Lets a test see WHETHER a given routing call carried exclusions
+    // (the driver share must route around active blocks like /api/route).
+    record(JSON.parse(rest[0] && rest[0].body || "{}").exclude_polygons ? "valhalla:with-exclusions" : "valhalla:plain");
     if (cfg.valhallaDown) throw new Error("Valhalla indisponivel (teste)");
     // Simulates ONE transient failure (network hiccup, momentary overload)
     // partway through a burst of calls — e.g. Access Manager firing many

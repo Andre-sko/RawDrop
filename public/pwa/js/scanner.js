@@ -48,7 +48,7 @@
     try {
       stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
     } catch (err) {
-      onError("camera", "Sem acesso à câmara. Autoriza o acesso e tenta outra vez.");
+      onError("camera", RTI18n.t("errCamera"));
       scanning = false;
       return;
     }

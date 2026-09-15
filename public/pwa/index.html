@@ -2,7 +2,7 @@
 <html lang="pt-PT">
 <head>
 <meta charset="utf-8" />
-<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover, maximum-scale=1" />
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
 <title>Route Tracker — Entregas</title>
 <meta name="theme-color" content="#10141A" />
 <meta name="description" content="Lista de entregas do dia, com mapa e sincronização offline." />
@@ -19,14 +19,19 @@
 
   <!-- Screen 1: Scanner -->
   <section id="scannerScreen" class="screen">
-    <h1>Route Tracker — Entregas</h1>
-    <p>Digitaliza o código QR partilhado pela ferramenta de rotas para carregares as tuas entregas de hoje.</p>
+    <div class="scanner-top">
+      <h1 data-i18n="appTitle">Route Tracker — Entregas</h1>
+      <select id="langSelect" class="lang-select" aria-label="Language">
+        <option value="pt">🇵🇹 PT</option><option value="en">🇬🇧 EN</option><option value="fr">🇫🇷 FR</option><option value="de">🇩🇪 DE</option><option value="it">🇮🇹 IT</option>
+      </select>
+    </div>
+    <p data-i18n="scanIntro">Digitaliza o código QR partilhado pela ferramenta de rotas para carregares as tuas entregas de hoje.</p>
     <div class="scanner-video-wrap" id="scannerVideoWrap">
       <video id="video" playsinline muted></video>
       <div class="scan-frame"></div>
     </div>
     <canvas id="canvas"></canvas>
-    <button id="scanStartBtn" class="btn-big">📷 Ler código QR</button>
+    <button id="scanStartBtn" class="btn-big" data-i18n="scanBtn">📷 Ler código QR</button>
     <div id="scanError" class="error-banner" hidden></div>
   </section>
 
@@ -35,29 +40,31 @@
     <header class="list-header">
       <div class="header-row">
         <div class="counters">
-          <div class="counter counter-pending"><span class="num" id="countPending">0</span><span class="lbl">Por entregar</span></div>
-          <div class="counter counter-done"><span class="num" id="countDone">0</span><span class="lbl">Concluídas</span></div>
+          <div class="counter counter-pending"><span class="num" id="countPending">0</span><span class="lbl" data-i18n="pending">Por entregar</span></div>
+          <div class="counter counter-done"><span class="num" id="countDone">0</span><span class="lbl" data-i18n="done">Concluídas</span></div>
         </div>
-        <button class="icon-btn-header" id="rescanBtn" title="Carregar nova rota">📷</button>
+        <button class="icon-btn-header" id="settingsBtn" data-i18n-title="settingsTitle" title="Definições">⚙️</button>
+        <button class="icon-btn-header" id="rescanBtn" data-i18n-title="rescanTitle" title="Carregar nova rota">📷</button>
       </div>
-      <button id="syncBadgeBtn" class="sync-badge" hidden><span id="syncCount">0</span> por sincronizar — toca para tentar agora</button>
+      <button id="syncBadgeBtn" class="sync-badge" hidden></button>
     </header>
-    <div id="expiredBanner" class="warn-banner" hidden>Esta rota expirou — as novas marcações podem não sincronizar.</div>
+    <div id="expiredBanner" class="warn-banner" data-i18n="expired" hidden>Esta rota expirou — as novas marcações podem não sincronizar.</div>
     <div id="listPending" class="stop-section"></div>
-    <div class="stop-section-header" id="doneHeader" hidden>Concluídas (<span id="countDone2">0</span>)</div>
+    <div class="stop-section-header" id="doneHeader" hidden></div>
     <div id="listDone" class="stop-section"></div>
   </section>
 
   <!-- Screen 3: Map -->
   <section id="mapScreen" class="screen" hidden>
     <div id="mapContainer"></div>
-    <button id="locateBtn" class="map-locate-btn" title="Centrar na minha localização">🎯</button>
+    <div id="nextStopBar" class="next-stop-bar" hidden></div>
+    <button id="locateBtn" class="map-locate-btn" data-i18n-title="locateTitle" title="Centrar na minha localização">🎯</button>
   </section>
 
   <!-- Bottom nav -->
   <nav id="bottomNav" hidden>
-    <button id="navList" class="nav-btn active"><span class="nav-icon">📋</span>Lista</button>
-    <button id="navMap" class="nav-btn"><span class="nav-icon">🗺️</span>Mapa</button>
+    <button id="navList" class="nav-btn active"><span class="nav-icon">📋</span><span data-i18n="navList">Lista</span></button>
+    <button id="navMap" class="nav-btn"><span class="nav-icon">🗺️</span><span data-i18n="navMap">Mapa</span></button>
   </nav>
 
   <!-- "Fechar paragem?" modal -->
@@ -65,11 +72,11 @@
     <div class="modal">
       <h2 id="modalAddress"></h2>
       <div class="modal-meta" id="modalMeta"></div>
-      <div class="modal-question">Fechar paragem?</div>
+      <div class="modal-question" data-i18n="closeStop">Fechar paragem?</div>
       <div class="modal-actions">
-        <button id="modalDeliveredBtn" class="btn-ok-lg">✓ Entregue</button>
-        <button id="modalFailedBtn" class="btn-fail-lg">✗ Falhou</button>
-        <button id="modalCancelBtn" class="btn-ghost-lg">Cancelar</button>
+        <button id="modalDeliveredBtn" class="btn-ok-lg">✓ <span data-i18n="delivered">Entregue</span></button>
+        <button id="modalFailedBtn" class="btn-fail-lg">✗ <span data-i18n="failed">Falhou</span></button>
+        <button id="modalCancelBtn" class="btn-ghost-lg" data-i18n="cancel">Cancelar</button>
       </div>
     </div>
   </div>
@@ -77,27 +84,52 @@
   <!-- Fail-reason modal -->
   <div id="reasonModal" class="modal-overlay" hidden>
     <div class="modal">
-      <h2>Motivo</h2>
+      <h2 data-i18n="reasonTitle">Motivo</h2>
       <div class="reason-options">
-        <button class="reason-opt" data-reason="Ninguém em casa">Ninguém em casa</button>
-        <button class="reason-opt" data-reason="Endereço não encontrado">Endereço não encontrado</button>
-        <button class="reason-opt" data-reason="Recusado pelo cliente">Recusado pelo cliente</button>
-        <button class="reason-opt" data-reason="Sem acesso / portão fechado">Sem acesso / portão fechado</button>
-        <button class="reason-opt" data-reason="Outro">Outro</button>
+        <button class="reason-opt" data-reason="no_one_home" data-i18n="reason_no_one_home">Ninguém em casa</button>
+        <button class="reason-opt" data-reason="not_found" data-i18n="reason_not_found">Endereço não encontrado</button>
+        <button class="reason-opt" data-reason="refused" data-i18n="reason_refused">Recusado pelo cliente</button>
+        <button class="reason-opt" data-reason="no_access" data-i18n="reason_no_access">Sem acesso / portão fechado</button>
+        <button class="reason-opt" data-reason="other" data-i18n="reason_other">Outro</button>
       </div>
-      <input id="reasonFreeText" type="text" placeholder="Detalhes (opcional)" hidden />
+      <input id="reasonFreeText" type="text" data-i18n-placeholder="reasonDetails" placeholder="Detalhes (opcional)" hidden />
       <div class="modal-actions">
-        <button id="reasonConfirmBtn" class="btn-fail-lg">Confirmar</button>
-        <button id="reasonCancelBtn" class="btn-ghost-lg">Cancelar</button>
+        <button id="reasonConfirmBtn" class="btn-fail-lg" data-i18n="confirm">Confirmar</button>
+        <button id="reasonCancelBtn" class="btn-ghost-lg" data-i18n="cancel">Cancelar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Settings modal (⚙️ in the list header) -->
+  <div id="settingsModal" class="modal-overlay" hidden>
+    <div class="modal">
+      <h2 data-i18n="settingsTitle">Definições</h2>
+      <label class="setting-row">
+        <span class="setting-label" data-i18n="settingLanguage">Língua</span>
+        <select id="langSelectHeader" class="lang-select" aria-label="Language">
+          <option value="pt">🇵🇹 Português</option><option value="en">🇬🇧 English</option><option value="fr">🇫🇷 Français</option><option value="de">🇩🇪 Deutsch</option><option value="it">🇮🇹 Italiano</option>
+        </select>
+      </label>
+      <label class="setting-row setting-toggle">
+        <span>
+          <span class="setting-label" data-i18n="settingAutoArrive">Chegada automática</span>
+          <span class="setting-hint" data-i18n="settingAutoArriveHint">Ao chegar a uma paragem (GPS), abre sozinho o "Entregue / Falhou".</span>
+        </span>
+        <input type="checkbox" id="autoArriveToggle" />
+      </label>
+      <div class="modal-actions">
+        <button id="settingsCloseBtn" class="btn-ghost-lg" data-i18n="close">Fechar</button>
       </div>
     </div>
   </div>
 
   <div id="toast" class="toast" hidden></div>
-  <div id="loadingOverlay" hidden>A carregar rota…</div>
+  <div id="loadingOverlay" data-i18n="loading" hidden>A carregar rota…</div>
 </div>
 
 <script src="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.js"></script>
+<script src="/pwa/js/i18n.js"></script>
+<script src="/pwa/js/settings.js"></script>
 <script src="/pwa/js/config.js"></script>
 <script src="/pwa/js/db.js"></script>
 <script src="/pwa/js/sync.js"></script>

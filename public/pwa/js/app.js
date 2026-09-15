@@ -7,11 +7,12 @@
 
   const els = {};
   ["scannerScreen", "scannerVideoWrap", "listScreen", "mapScreen", "video", "canvas", "scanStartBtn", "scanError",
-   "navList", "navMap", "rescanBtn", "syncBadgeBtn", "syncCount",
-   "countPending", "countDone", "countDone2", "doneHeader", "listPending", "listDone",
+   "navList", "navMap", "rescanBtn", "syncBadgeBtn",
+   "countPending", "countDone", "doneHeader", "listPending", "listDone",
    "stopModal", "modalAddress", "modalMeta", "modalDeliveredBtn", "modalFailedBtn", "modalCancelBtn",
    "reasonModal", "reasonFreeText", "reasonConfirmBtn", "reasonCancelBtn",
-   "toast", "mapContainer", "locateBtn", "expiredBanner", "loadingOverlay"]
+   "toast", "mapContainer", "locateBtn", "nextStopBar", "expiredBanner", "loadingOverlay",
+   "settingsBtn", "settingsModal", "settingsCloseBtn", "autoArriveToggle"]
     .forEach((id) => { els[id] = document.getElementById(id); });
 
   let currentStops = [];
@@ -25,7 +26,8 @@
     els.navList.classList.toggle("active", name === "list");
     els.navMap.classList.toggle("active", name === "map");
     document.getElementById("bottomNav").hidden = name === "scanner";
-    if (name === "map") ensureMap();
+    if (name === "map") ensureMap().then(() => RTMap.startTracking());
+    else if (mapReady) RTMap.stopTracking();
   }
 
   function setLoading(on) {
@@ -34,15 +36,24 @@
 
   async function ensureMap() {
     if (mapReady) {
-      RTMap.update(currentStops, currentRoute && currentRoute.geometry);
+      RTMap.update(currentStops, currentRoute && currentRoute.geometry, currentRoute && currentRoute.restrictions);
       return;
     }
     mapReady = true;
     await RTMap.init(els.mapContainer, {
       onTap: (id) => RTDB.getStop(id).then((stop) => stop && listOpenModal(stop)),
       locateBtn: els.locateBtn,
+      nextStopBar: els.nextStopBar,
+      // GPS says we've reached the next pending stop: open its
+      // Entregue/Falhou modal without the driver having to find the card.
+      // Opt-in (⚙️ > "Chegada automática"), off by default.
+      onArrive: (id) => {
+        if (!RTSettings.get("autoArrive")) return false; // not handled — keep the stop eligible
+        RTDB.getStop(id).then((stop) => stop && stop.status === "pending" && listOpenModal(stop));
+        return true;
+      },
     });
-    RTMap.update(currentStops, currentRoute && currentRoute.geometry);
+    RTMap.update(currentStops, currentRoute && currentRoute.geometry, currentRoute && currentRoute.restrictions);
   }
 
   function listOpenModal(stop) {
@@ -59,14 +70,16 @@
   async function refresh() {
     currentStops = await RTDB.getStops();
     RTList.render(currentStops);
-    if (mapReady) RTMap.update(currentStops, currentRoute && currentRoute.geometry);
+    if (mapReady) RTMap.update(currentStops, currentRoute && currentRoute.geometry, currentRoute && currentRoute.restrictions);
     const count = await RTDB.countQueue();
     updateSyncBadge(count);
   }
 
+  let lastSyncCount = 0;
   function updateSyncBadge(count) {
+    lastSyncCount = count;
     els.syncBadgeBtn.hidden = count === 0;
-    els.syncCount.textContent = count;
+    els.syncBadgeBtn.textContent = RTI18n.t("syncBadge", { n: count });
   }
 
   // The one place a stop's status actually changes: write local first
@@ -81,10 +94,10 @@
   }
 
   function friendlyImportError(status, networkFailed) {
-    if (networkFailed) return "Sem rede. Liga-te à internet para carregar esta rota pela primeira vez.";
-    if (status === 410) return "Esta rota expirou. Pede um novo código QR.";
-    if (status === 404) return "Código inválido — este link não existe.";
-    return "Não foi possível carregar a rota. Tenta outra vez.";
+    if (networkFailed) return RTI18n.t("errNoNetwork");
+    if (status === 410) return RTI18n.t("errExpired");
+    if (status === 404) return RTI18n.t("errInvalid");
+    return RTI18n.t("errGeneric");
   }
 
   async function importRoute(token) {
@@ -115,11 +128,11 @@
       await RTDB.clearAll();
     }
 
-    await RTDB.saveRoute({ token: data.token, expiresAt: data.expiresAt, roundTrip: data.route.roundTrip, createdAt: data.route.createdAt, geometry: data.route.geometry });
+    await RTDB.saveRoute({ token: data.token, expiresAt: data.expiresAt, roundTrip: data.route.roundTrip, createdAt: data.route.createdAt, geometry: data.route.geometry, restrictions: data.route.restrictions || [] });
     // The server's order is final — never re-sorted or re-numbered here.
     await RTDB.saveStops(data.stops.map((s) => ({ ...s, dirty: false })));
 
-    currentRoute = { token: data.token, expiresAt: data.expiresAt, geometry: data.route.geometry };
+    currentRoute = { token: data.token, expiresAt: data.expiresAt, geometry: data.route.geometry, restrictions: data.route.restrictions || [] };
     RTSync.setToken(data.token);
     mapReady = false; // force RTMap.init() again if a previous route had already built the map
     setLoading(false);
@@ -166,10 +179,10 @@
     els.rescanBtn.addEventListener("click", async () => {
       const queueCount = await RTDB.countQueue();
       if (queueCount > 0) {
-        const proceed = confirm(`Tens ${queueCount} marcação(ões) ainda por sincronizar. Carregar uma nova rota vai apagá-las. Continuar?`);
+        const proceed = confirm(RTI18n.t("confirmReplaceQueued", { n: queueCount }));
         if (!proceed) return;
       } else if (currentStops.length > 0) {
-        const proceed = confirm("Carregar uma nova rota substitui a rota atual. Continuar?");
+        const proceed = confirm(RTI18n.t("confirmReplace"));
         if (!proceed) return;
       }
       RTScanner.stop();
@@ -183,10 +196,35 @@
     navigator.serviceWorker.register("/pwa/sw.js").catch(() => { /* offline shell just won't be cached — the app still works online */ });
   }
 
+  function wireSettings() {
+    els.settingsBtn.addEventListener("click", () => {
+      els.autoArriveToggle.checked = RTSettings.get("autoArrive");
+      els.settingsModal.hidden = false;
+    });
+    els.settingsCloseBtn.addEventListener("click", () => { els.settingsModal.hidden = true; });
+    els.settingsModal.addEventListener("click", (ev) => { if (ev.target === els.settingsModal) els.settingsModal.hidden = true; });
+    els.autoArriveToggle.addEventListener("change", (ev) => RTSettings.set("autoArrive", ev.target.checked));
+  }
+
+  function wireLanguage() {
+    RTI18n.applyStatic();
+    const selects = [document.getElementById("langSelect"), document.getElementById("langSelectHeader")].filter(Boolean);
+    selects.forEach((sel) => { sel.value = RTI18n.getLang(); sel.addEventListener("change", (e) => RTI18n.setLang(e.target.value)); });
+    // Everything rendered from data (cards, counters, badge) is re-rendered
+    // in the new language; static markup is handled by applyStatic().
+    RTI18n.onLangChange(() => {
+      selects.forEach((sel) => { sel.value = RTI18n.getLang(); });
+      RTList.render(currentStops);
+      updateSyncBadge(lastSyncCount);
+    });
+  }
+
   async function boot() {
+    wireLanguage();
+    wireSettings();
     registerServiceWorker();
     RTList.init(
-      { countPending: els.countPending, countDone: els.countDone, countDone2: els.countDone2, doneHeader: els.doneHeader, listPending: els.listPending, listDone: els.listDone, toast: els.toast, stopModal: els.stopModal, modalAddress: els.modalAddress, modalMeta: els.modalMeta, modalDeliveredBtn: els.modalDeliveredBtn, modalFailedBtn: els.modalFailedBtn, modalCancelBtn: els.modalCancelBtn, reasonModal: els.reasonModal, reasonFreeText: els.reasonFreeText, reasonConfirmBtn: els.reasonConfirmBtn, reasonCancelBtn: els.reasonCancelBtn },
+      { countPending: els.countPending, countDone: els.countDone, doneHeader: els.doneHeader, listPending: els.listPending, listDone: els.listDone, toast: els.toast, stopModal: els.stopModal, modalAddress: els.modalAddress, modalMeta: els.modalMeta, modalDeliveredBtn: els.modalDeliveredBtn, modalFailedBtn: els.modalFailedBtn, modalCancelBtn: els.modalCancelBtn, reasonModal: els.reasonModal, reasonFreeText: els.reasonFreeText, reasonConfirmBtn: els.reasonConfirmBtn, reasonCancelBtn: els.reasonCancelBtn },
       {
         onMarkStop: setStopStatus,
         onUndo: (id) => setStopStatus(id, "pending", null),

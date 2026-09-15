@@ -26,10 +26,11 @@ const {
 } = require("./src/config");
 const {
   GEOCODE_CACHE_TTL_MS, DISTANCE_CACHE_TTL_MS,
-  loadCache, saveCache, geocodeCache, distanceCache,
+  loadCache, saveCache, flushSaves, writeJsonAtomic, geocodeCache, distanceCache,
   geocodeCacheKey, distanceCacheKey, getFromCache, summariseCache,
 } = require("./src/cache");
-const { optimizeOrder, computeLatenessReport, routeSeconds, unreachableStops } = require("./src/optimizer");
+const { computeLatenessReport, routeSeconds, unreachableStops } = require("./src/optimizer");
+const { optimizeOrderAsync } = require("./src/optimizerPool");
 const {
   API_LOG_FILE, apiLog, todayKey, logApiRequest, buildCostEstimate,
 } = require("./src/api-log");
@@ -98,6 +99,8 @@ const FUEL_PRICE_BY_COUNTRY = {
 };
 const DEFAULT_FUEL_PRICE = { price: 1.65, currency: "EUR" };
 
+const MAX_OPTIMIZE_STOPS = Math.max(3, Number(process.env.MAX_OPTIMIZE_STOPS || 250));
+
 if (!API_KEY) {
   console.error(
     "Erro: GOOGLE_MAPS_API_KEY nao definida.\n" +
@@ -150,6 +153,9 @@ if (!VALHALLA_URL) {
 // especially the "share via QR" feature below) can comfortably exceed
 // 100kb well before it's anywhere near a real problem.
 app.use(express.json({ limit: "10mb" }));
+// Whatever a request cached/logged is on disk by the time its response
+// has gone out (see saveCache/flushSaves in src/cache.js).
+app.use((req, res, next) => { res.on("finish", flushSaves); next(); });
 
 // -----------------------------------------------------------------------
 // Shared export links (QR code sharing) — lets you export a route or
@@ -321,7 +327,7 @@ app.get("/api/share/:token", (req, res) => {
   res.json({
     token: share.token,
     expiresAt: share.expiresAt,
-    route: { roundTrip: share.roundTrip, createdAt: share.createdAt, geometry: share.geometry },
+    route: { roundTrip: share.roundTrip, createdAt: share.createdAt, geometry: share.geometry, restrictions: share.restrictions || [] },
     stops: share.stops,
   });
 });
@@ -795,7 +801,7 @@ app.post("/api/share-export", async (req, res) => {
 // after the auth middleware); the two endpoints the resulting link is
 // for do not, on purpose — see their own comments near GET /shared/:token.
 app.post("/api/share/route", async (req, res) => {
-  const { addresses, roundTrip, deadlines } = req.body || {};
+  const { addresses, roundTrip, deadlines, originalAddresses, restricted } = req.body || {};
   if (!Array.isArray(addresses) || addresses.length === 0 || addresses.some((a) => typeof a !== "string" || !a.trim())) {
     return res.status(400).json({ error: "addresses tem de ser uma lista de texto nao vazia" });
   }
@@ -803,25 +809,45 @@ app.post("/api/share/route", async (req, res) => {
     return res.status(400).json({ error: "deadlines, quando enviado, tem de ter o mesmo tamanho que addresses" });
   }
 
+  // `addresses` arrive alias-RESOLVED (a "lat,lng" wherever the office
+  // page had an alias) so routing works; `originalAddresses` is the text
+  // the dispatcher actually typed, which is what a driver wants to read
+  // on the card. `restricted` marks walk-only stops, same flags the
+  // office map uses.
+  const originals = Array.isArray(originalAddresses) && originalAddresses.length === addresses.length ? originalAddresses : null;
+  const restrictedFlags = Array.isArray(restricted) && restricted.length === addresses.length
+    ? restricted.map(Boolean)
+    : addresses.map(() => false);
+
   const coords = await Promise.all(addresses.map((a) => resolveToCoords(a).catch(() => null)));
 
-  // Best-effort driving geometry for the driver's map screen — the same
-  // engine /api/route already uses, called plainly (no restriction
-  // exclusion here: that logic is significant and this polyline is a
-  // nice-to-have visual aid, not a routing guarantee). Missing Valhalla,
-  // fewer than 2 resolved points, or any Valhalla error just means no
-  // polyline; the share itself still succeeds.
+  // The driver's map must show the SAME route the dispatcher approved on
+  // the office map: around the active road exclusions and on foot where
+  // the van can't go — not a plain shortest path that may run straight
+  // through a blocked street (which is what this used to draw). Same
+  // three steps as POST /api/route. Missing Valhalla or any routing error
+  // just means no polyline; the share itself still succeeds.
   let geometry = null;
+  let restrictionsForDriver = [];
   if (VALHALLA_URL) {
     try {
-      const route = await valhallaRoute(addresses);
+      const points = coords.filter(Boolean).map((c) => [c.lng, c.lat]);
+      const relevant = restrictionsNear(points, listActiveRestrictions());
+      const { polygons } = buildExcludePolygonsPayload(relevant);
+      const route = restrictedFlags.some(Boolean)
+        ? await valhallaRouteMixed(addresses, restrictedFlags, { excludePolygons: polygons })
+        : await valhallaRoute(addresses, { excludePolygons: polygons });
       geometry = route.geometry;
+      restrictionsForDriver = relevant.map((r) => ({ id: r.id, geometry: r.geometry, reason: r.reason || null }));
     } catch (err) {
       geometry = null;
     }
   }
 
-  const share = createRouteShare({ addresses, coords, deadlines, roundTrip, geometry });
+  const share = createRouteShare({
+    addresses, coords, deadlines, roundTrip, geometry,
+    originalAddresses: originals, restrictedFlags, restrictions: restrictionsForDriver,
+  });
 
   try {
     const { url, qrDataUrl, usedLanFallback, lanFallbackFailed, usedManualOverride } = await buildShareUrlAndQr(req, share.token);
@@ -859,8 +885,7 @@ function readAliases() {
 }
 
 function writeAliases(list) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-  fs.writeFileSync(ALIASES_FILE, JSON.stringify(list, null, 2), "utf-8");
+  writeJsonAtomic(ALIASES_FILE, list); // tmp + rename: a crash mid-write can't truncate the list
 }
 
 function normalizeKey(s) {
@@ -954,8 +979,7 @@ function readDeliveryTimes() {
 }
 
 function writeDeliveryTimes(list) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-  fs.writeFileSync(DELIVERY_TIMES_FILE, JSON.stringify(list, null, 2), "utf-8");
+  writeJsonAtomic(DELIVERY_TIMES_FILE, list); // tmp + rename: a crash mid-write can't truncate the list
 }
 
 // GET /api/delivery-times -> lists all saved delivery deadlines
@@ -1020,8 +1044,7 @@ function readBlocked() {
 }
 
 function writeBlocked(list) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-  fs.writeFileSync(BLOCKED_FILE, JSON.stringify(list, null, 2), "utf-8");
+  writeJsonAtomic(BLOCKED_FILE, list); // tmp + rename: a crash mid-write can't truncate the list
 }
 
 // GET /api/blocked -> lists all saved blocked addresses
@@ -1534,13 +1557,14 @@ app.post("/api/optimize", async (req, res) => {
   if (!Array.isArray(addresses) || addresses.length < 3) {
     return res.status(400).json({ error: "sao precisos pelo menos 3 enderecos para otimizar" });
   }
-  // No hard practical limit: the distance matrix is built in 10x10
-  // blocks, so any number of addresses works — it just takes longer and
-  // makes more requests to Google (the number of requests grows as
-  // (n/10)^2). We just keep a generous safeguard against accidentally
-  // huge lists.
-  if (addresses.length > 500) {
-    return res.status(400).json({ error: "maximo de 500 enderecos por otimizacao" });
+  // Hard cap per route. The matrix itself would cope with more (it's
+  // built in 10x10 blocks), but the optimizer is O(n²) per pass:
+  // measured ~1-3s at 200 stops, ~3-9s at 300, 17-74s at 500 — past
+  // ~250 a single request ties up a worker for long enough to hurt
+  // everyone queued behind it, and a real van doesn't do that many
+  // stops in a day anyway. Raise MAX_OPTIMIZE_STOPS in .env knowingly.
+  if (addresses.length > MAX_OPTIMIZE_STOPS) {
+    return res.status(400).json({ error: `maximo de ${MAX_OPTIMIZE_STOPS} enderecos por otimizacao (MAX_OPTIMIZE_STOPS)` });
   }
 
   const restrictedFlags = Array.isArray(restricted) && restricted.length === addresses.length
@@ -1600,7 +1624,7 @@ app.post("/api/optimize", async (req, res) => {
     } else {
       durations = await buildMixedDurationMatrix(addresses, mode || "driving", restrictedFlags, walkingMatrixOverride);
     }
-    const order = optimizeOrder(durations, !!roundTrip, {
+    const order = await optimizeOrderAsync(durations, !!roundTrip, {
       deadlines: deadlineArr, startMinutes: startMin, stopMinutes: stopMin, lockedIndices: lockedIndicesArr,
     });
     const lateStops = computeLatenessReport(order, durations, deadlineArr, startMin, stopMin);
@@ -1841,7 +1865,7 @@ app.post("/api/road-exclusion/preview", async (req, res) => {
     // rescued stop somewhere geographically nonsensical, because the
     // optimizer never actually saw a real cost for reaching it.
     matrix = await rescueStrandedWithAccessManager(matrix, addresses, points, allExcludePolygons, roundTrip);
-    const order = optimizeOrder(matrix, !!roundTrip, { deadlines: deadlineArr, startMinutes: startMin, stopMinutes: stopMin });
+    const order = await optimizeOrderAsync(matrix, !!roundTrip, { deadlines: deadlineArr, startMinutes: startMin, stopMinutes: stopMin });
 
     // If the best order still has to cross a pair no rescue could fix,
     // there is no valid alternative route THROUGH that stop — but that is

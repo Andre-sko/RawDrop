@@ -8,7 +8,10 @@
   "private": true,
   "scripts": {
     "start": "node server.js",
-    "test": "node --test --test-concurrency=1 test/*.test.js"
+    "test": "node --test --test-concurrency=1 test/*.test.js",
+    "backup": "node scripts/backup-data.js",
+    "backup:list": "node scripts/backup-data.js --list",
+    "backup:restore": "node scripts/backup-data.js --restore"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.119.0",

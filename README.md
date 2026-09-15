@@ -408,6 +408,68 @@ curl -X DELETE http://localhost:3000/api/cache -H "Content-Type: application/jso
 
 (Requires an authenticated session if `APP_PASSWORD` is set.)
 
+## Updating safely: rollback for code AND data
+
+Two different things can break after an update, and they need two
+different safety nets.
+
+**Code** — git. Tag the version you're running whenever it's known good,
+so getting back to it is one command:
+
+```bash
+git tag v1.4          # right after you start a version that works
+# ... later, an update misbehaves:
+git checkout v1.4     # back to the known-good code
+# restart the server
+```
+
+Commit each finished feature on its own; `git revert <commit>` then rolls
+back just that feature while keeping the rest.
+
+**Data** — `data/` is gitignored on purpose (it's yours, not the app's),
+so a code rollback never touches it. That cuts both ways: a newer version
+may have changed a file's shape, and the older code then misreads it. So
+snapshot the data before every update, and restore it if you roll back:
+
+```bash
+npm run backup                   # snapshot -> backups/data-YYYY-MM-DD_HHMMSS/
+npm run backup:list              # what's there
+npm run backup:restore -- NAME   # put a snapshot back (stop the server first)
+```
+
+`backup` keeps the newest 20 snapshots (`BACKUP_KEEP` in `.env`) and
+writes them next to the project (`BACKUP_DIR` to move them, e.g. onto
+another disk). `restore` first snapshots the current state, so restoring
+the wrong one is itself undoable. Both honour `DATA_DIR`.
+
+The routine, then: `npm run backup` → `git tag` → update → restart. If
+anything's wrong: `git checkout <tag>` → `npm run backup:restore -- <name>`
+→ restart.
+
+## Capacity: what the server copes with, and the knobs
+
+Measured, not guessed — the full analysis and the roadmap to
+multi-vehicle are in [`docs/ESCALABILIDADE.md`](docs/ESCALABILIDADE.md).
+
+- **Stops per route:** capped at 250 (`MAX_OPTIMIZE_STOPS` in `.env`).
+  The optimizer is O(n²) per pass — ~0.1 s at 100 stops, 1-3 s at 200,
+  17-74 s at 500 — so the cap is there to keep a single request from
+  hogging the optimizer worker for everyone else.
+- **The optimizer runs in a worker thread** (`src/optimizerPool.js`), so
+  a long optimization never freezes the server for other users: during a
+  3.5 s optimize of 240 stops, other requests are still answered in
+  ~2 ms. One worker by default; `OPTIMIZER_WORKERS=2` if the machine has
+  cores to spare and dispatchers really do optimize at the same moment.
+- **Data files are written atomically** (temp file + rename) and cache
+  writes are coalesced (`CACHE_SAVE_DEBOUNCE_MS`, default 500 ms, always
+  flushed before a response goes out and on shutdown). A crash or power
+  cut mid-write leaves the previous file intact instead of a truncated
+  JSON — which, for the caches, used to mean every geocode and leg ever
+  paid for was gone.
+- **Data volume:** JSON files are read/rewritten whole; comfortable up to
+  ~10 000 entries per list. Beyond that (or for multi-vehicle work at
+  all), the next step is SQLite — see the doc.
+
 ## Fuel price (section 08, exports)
 
 The fuel cost line in CSV/TXT exports uses a price per litre that comes

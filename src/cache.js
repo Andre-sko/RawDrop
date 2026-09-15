@@ -30,13 +30,59 @@ function loadCache(file) {
   }
 }
 
+// Atomic: serialised to a temp file first, then renamed over the real one
+// (rename is atomic on the same filesystem), so a crash or power cut
+// mid-write leaves the previous file intact instead of a truncated JSON
+// that fails to parse — which, for the caches, would silently throw away
+// every geocode and leg ever paid for.
+function writeJsonAtomic(file, data) {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+  const tempFile = `${file}.${process.pid}.tmp`;
+  fs.writeFileSync(tempFile, JSON.stringify(data), "utf-8");
+  fs.renameSync(tempFile, file);
+}
+
+// Coalesced: a route calculation saves the distance cache once per NEW
+// leg it fetches (and every request logs to the API log) — with a large
+// list that was hundreds of full rewrites of a growing file in a row.
+// Callers keep calling saveCache() whenever they like; the actual disk
+// write happens at most once per SAVE_DEBOUNCE_MS per file, always with
+// the latest state. Two things force pending writes out early:
+//   - flushSaves() at the end of every HTTP request (see server.js), so
+//     a response never goes out with its side effects still in memory —
+//     a crash right after replying, or a client reading the file next,
+//     sees exactly what the response promised;
+//   - process exit / SIGINT / SIGTERM, for a clean shutdown.
+// So the window only ever spans one request's own burst of saves.
+const SAVE_DEBOUNCE_MS = Number(process.env.CACHE_SAVE_DEBOUNCE_MS || 500);
+const pendingSaves = new Map(); // file -> { data, timer }
+
 function saveCache(file, cache) {
-  try {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-    fs.writeFileSync(file, JSON.stringify(cache), "utf-8");
-  } catch (err) {
-    console.warn(`Warning: could not save ${path.basename(file)}: ${err.message}`);
+  const pending = pendingSaves.get(file);
+  if (pending) { pending.data = cache; return; }
+  const entry = { data: cache, timer: null };
+  entry.timer = setTimeout(() => {
+    pendingSaves.delete(file);
+    try { writeJsonAtomic(file, entry.data); }
+    catch (err) { console.warn(`Warning: could not save ${path.basename(file)}: ${err.message}`); }
+  }, SAVE_DEBOUNCE_MS);
+  // Never keep the process alive just for a pending cache write.
+  if (entry.timer.unref) entry.timer.unref();
+  pendingSaves.set(file, entry);
+}
+
+function flushSaves() {
+  for (const [file, entry] of pendingSaves) {
+    clearTimeout(entry.timer);
+    try { writeJsonAtomic(file, entry.data); }
+    catch (err) { console.warn(`Warning: could not save ${path.basename(file)}: ${err.message}`); }
   }
+  pendingSaves.clear();
+}
+
+process.on("exit", flushSaves);
+for (const sig of ["SIGINT", "SIGTERM"]) {
+  process.on(sig, () => { flushSaves(); process.exit(0); });
 }
 
 const geocodeCache = loadCache(GEOCODE_CACHE_FILE);
@@ -100,6 +146,8 @@ module.exports = {
   DISTANCE_CACHE_TTL_MS,
   loadCache,
   saveCache,
+  flushSaves,
+  writeJsonAtomic,
   geocodeCache,
   distanceCache,
   normalizeCacheText,

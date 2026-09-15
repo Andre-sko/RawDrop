@@ -1,6 +1,7 @@
 .env
 node_modules/
 data/
+backups/
 switzerland*
 .envbak
 todo.txt

@@ -778,3 +778,72 @@ describe("walk-only routing survives OSRM+Google both being unusable", () => {
     } finally { await s.stop(); }
   });
 });
+
+// The driver share (POST /api/share/route) must hand the PWA the SAME
+// route the dispatcher sees on the office map — routed around the active
+// road exclusions and on foot where the van can't go — plus what it
+// needs to draw and label it: the exclusions themselves, each stop's
+// walk-only flag, and the dispatcher's own address text (not the alias
+// coordinate the routing used).
+describe("driver share follows the office map (exclusions, walk-only, aliases)", () => {
+  test("routes with the active exclusions and echoes them, walk-only flags and original addresses", async () => {
+    const s = await startServer({ env: { VALHALLA_URL: "http://localhost:8002", APP_PASSWORD: "" } });
+    try {
+      // Activate the standard A-B block via the real preview/confirm flow.
+      const before = await postJson(s.baseUrl, "/api/route", { addresses: [A, B, C] });
+      const preview = await postJson(s.baseUrl, "/api/road-exclusion/preview", {
+        addresses: [A, B, C], routeGeometry: ROUTE_GEOMETRY,
+        previousRoute: { distanceMeters: before.body.distanceMeters, durationSeconds: before.body.durationSeconds },
+        pointA: POINT_A, pointB: POINT_B,
+      });
+      assert.strictEqual(preview.status, 200);
+      const confirm = await postJson(s.baseUrl, "/api/road-exclusion/confirm", { draftRestriction: preview.body.draftRestriction });
+      assert.strictEqual(confirm.status, 200);
+
+      s.calls();
+      const share = await postJson(s.baseUrl, "/api/share/route", {
+        addresses: [A, B, C],
+        originalAddresses: ["Armazém Central", B, "Rua do Cliente 5"],
+        restricted: [false, false, true],
+        deadlines: [null, "10:30", null],
+        roundTrip: false,
+      });
+      assert.strictEqual(share.status, 200);
+      const calls = s.calls();
+      // The driving legs carry the exclusions; the walk-only leg (B->C on
+      // foot) is routed as a pedestrian without them — a closed road for
+      // the van isn't closed for someone walking — so exactly one of each.
+      assert.strictEqual(calls.filter((c) => c === "valhalla:with-exclusions").length, 1, JSON.stringify(calls));
+      assert.strictEqual(calls.filter((c) => c === "valhalla:plain").length, 1, JSON.stringify(calls));
+
+      const got = await getJson(s.baseUrl, "/api/share/" + share.body.token);
+      assert.strictEqual(got.status, 200);
+      assert.ok(got.body.route.geometry && got.body.route.geometry.coordinates.length >= 2, "geometria presente");
+      assert.strictEqual(got.body.route.restrictions.length, 1, "a exclusao ativa vai no share para o mapa do condutor");
+      assert.strictEqual(got.body.route.restrictions[0].id, confirm.body.id);
+      assert.strictEqual(got.body.route.restrictions[0].geometry.type, "LineString");
+
+      const [s0, s1, s2] = got.body.stops;
+      assert.strictEqual(s0.address, "Armazém Central", "o condutor le o texto do despachante, nao a coordenada do alias");
+      assert.strictEqual(s0.routedAs, A);
+      assert.strictEqual(s1.address, B);
+      assert.strictEqual(s1.routedAs, null, "sem alias, nada a mostrar por baixo");
+      assert.strictEqual(s2.walkOnly, true);
+      assert.strictEqual(s0.walkOnly, false);
+      assert.strictEqual(s1.deadline, "10:30");
+    } finally { await s.stop(); }
+  });
+
+  test("without originalAddresses/restricted the share still works exactly as before", async () => {
+    const s = await startServer({ env: { VALHALLA_URL: "http://localhost:8002", APP_PASSWORD: "" } });
+    try {
+      const share = await postJson(s.baseUrl, "/api/share/route", { addresses: [A, B], roundTrip: false });
+      assert.strictEqual(share.status, 200);
+      const got = await getJson(s.baseUrl, "/api/share/" + share.body.token);
+      assert.deepStrictEqual(got.body.route.restrictions, []);
+      assert.strictEqual(got.body.stops[0].address, A);
+      assert.strictEqual(got.body.stops[0].routedAs, null);
+      assert.strictEqual(got.body.stops[0].walkOnly, false);
+    } finally { await s.stop(); }
+  });
+});

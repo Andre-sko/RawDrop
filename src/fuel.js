@@ -21,6 +21,7 @@ const {
   FUEL_PRICE_API_URL, FUEL_PRICE_RADIUS_KM, FUEL_PRICE_STATIONS,
   FUEL_FX_API_URL, FUEL_CURRENCY, FUEL_SETTINGS_FILE,
 } = require("./config");
+const { writeJsonAtomic } = require("./cache");
 
 const PRICE_CACHE_MS = 60 * 60 * 1000;
 const FX_CACHE_MS = 24 * 60 * 60 * 1000;
@@ -41,8 +42,7 @@ function readSettings() {
 }
 
 function writeSettings(settings) {
-  fs.mkdirSync(require("path").dirname(FUEL_SETTINGS_FILE), { recursive: true });
-  fs.writeFileSync(FUEL_SETTINGS_FILE, JSON.stringify(settings, null, 2));
+  writeJsonAtomic(FUEL_SETTINGS_FILE, settings);
 }
 
 // Average diesel price (EUR/L) of the FUEL_PRICE_STATIONS French stations

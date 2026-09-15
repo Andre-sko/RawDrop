@@ -17,11 +17,14 @@
 //     createdAt: string (ISO),
 //     expiresAt: string (ISO),
 //     geometry: GeoJSON LineString | null,  // driving geometry for the map screen, best-effort
+//     restrictions: [{ id, geometry: LineString, reason }],  // active road exclusions near the route
 //     stops: [
 //       {
 //         id: string,               // stable per stop, see stopId() below
 //         order: number,            // 0-based position, server-decided, never reordered by a client
-//         address: string,
+//         address: string,          // what the driver reads (dispatcher's text, alias unresolved)
+//         routedAs: string | null,  // the alias target it was actually routed with, when different
+//         walkOnly: boolean,        // van can't reach it — driver walks the last leg
 //         lat: number | null,       // null when geocoding failed for this address
 //         lng: number | null,
 //         deadline: string | null,  // "HH:MM", when known
@@ -139,15 +142,21 @@ function pruneExpired() {
 // `addresses[i]` — the caller (server.js) is responsible for that
 // alignment; a missing or malformed entry just leaves that stop's
 // lat/lng or deadline null rather than failing the whole share.
-function createRouteShare({ addresses, coords, deadlines, roundTrip, geometry }) {
+function createRouteShare({ addresses, coords, deadlines, roundTrip, geometry, originalAddresses, restrictedFlags, restrictions }) {
   const now = Date.now();
   const stops = addresses.map((address, i) => {
     const c = coords && coords[i];
     const deadline = deadlines && typeof deadlines[i] === "string" ? deadlines[i] : null;
+    const original = originalAddresses && typeof originalAddresses[i] === "string" && originalAddresses[i].trim() ? originalAddresses[i].trim() : null;
     return {
       id: stopId(i, address),
       order: i,
-      address,
+      // What the driver reads: the dispatcher's own text when it differs
+      // from the routed value (an alias resolved to "lat,lng"), else the
+      // routed value itself. `routedAs` keeps the resolved form around.
+      address: original && original !== address ? original : address,
+      routedAs: original && original !== address ? address : null,
+      walkOnly: !!(restrictedFlags && restrictedFlags[i]),
       lat: c && typeof c.lat === "number" ? c.lat : null,
       lng: c && typeof c.lng === "number" ? c.lng : null,
       deadline,
@@ -170,6 +179,10 @@ function createRouteShare({ addresses, coords, deadlines, roundTrip, geometry })
     // never changes for a given share and a driver may open the map
     // screen many times over the work day.
     geometry: geometry || null,
+    // Active road exclusions the route had to respect, for the driver's
+    // map to draw (id + LineString + reason) — nothing the driver can
+    // edit, just "this street is closed, that's why the line bends".
+    restrictions: Array.isArray(restrictions) ? restrictions : [],
     stops,
   };
 

@@ -5,13 +5,12 @@
 (function (global) {
   "use strict";
 
-  const FAIL_REASONS = [
-    "Ninguém em casa",
-    "Endereço não encontrado",
-    "Recusado pelo cliente",
-    "Sem acesso / portão fechado",
-    "Outro",
-  ];
+  const t = (k, v) => RTI18n.t(k, v);
+
+  // Reason codes are what the buttons carry (stable, language-independent);
+  // what gets STORED and synced is the translated text, same as before, so
+  // the office app keeps showing a readable reason without knowing codes.
+  const FAIL_REASON_CODES = ["no_one_home", "not_found", "refused", "no_access", "other"];
 
   let els = {};
   let callbacks = {};
@@ -32,18 +31,20 @@
   }
 
   function statusLabel(stop) {
-    if (stop.status === "delivered") return "✓ Entregue";
-    if (stop.status === "failed") return `✗ Falhou${stop.statusReason ? " — " + escapeHtml(stop.statusReason) : ""}`;
+    if (stop.status === "delivered") return t("statusDelivered");
+    if (stop.status === "failed") return `${t("statusFailed")}${stop.statusReason ? " — " + escapeHtml(stop.statusReason) : ""}`;
     return "";
   }
 
   function cardHtml(stop, done) {
     const deadline = stop.deadline ? `<span class="deadline-badge">🎯 ${escapeHtml(stop.deadline)}</span>` : "";
+    const walk = stop.walkOnly ? `<span class="walk-badge" title="${escapeHtml(t("walkOnlyTitle"))}">🚶 ${escapeHtml(t("walkOnly"))}</span>` : "";
+    const routedAs = stop.routedAs ? `<div class="stop-routed-as">📌 ${escapeHtml(stop.routedAs)}</div>` : "";
     const actions = done
-      ? `<div class="stop-actions"><button class="btn-undo" data-action="undo" title="Repor pendente">↺ Repor</button></div>`
+      ? `<div class="stop-actions"><button class="btn-undo" data-action="undo" title="${escapeHtml(t("undoTitle"))}">${escapeHtml(t("undo"))}</button></div>`
       : `<div class="stop-actions">
-           <button class="btn-ok" data-action="ok" title="Entregue">✓</button>
-           <button class="btn-fail" data-action="fail" title="Falhou">✗</button>
+           <button class="btn-ok" data-action="ok" title="${escapeHtml(t("delivered"))}">✓</button>
+           <button class="btn-fail" data-action="fail" title="${escapeHtml(t("failed"))}">✗</button>
          </div>`;
     const statusRow = done ? `<div class="stop-status stop-status-${stop.status}">${statusLabel(stop)}</div>` : "";
 
@@ -52,10 +53,12 @@
         <div class="stop-order">${stop.order + 1}</div>
         <div class="stop-main" data-action="open-modal">
           <div class="stop-address">${escapeHtml(stop.address)}</div>
+          ${routedAs}
           <div class="stop-meta">
-            <button class="icon-btn" data-action="copy" title="Copiar endereço">📋</button>
-            <a class="icon-btn" data-action="maps" href="${mapsUrl(stop)}" target="_blank" rel="noopener" title="Abrir no Google Maps">📍</a>
+            <button class="icon-btn" data-action="copy" title="${escapeHtml(t("copyTitle"))}">📋</button>
+            <a class="icon-btn" data-action="maps" href="${mapsUrl(stop)}" target="_blank" rel="noopener" title="${escapeHtml(t("mapsTitle"))}">📍</a>
             ${deadline}
+            ${walk}
           </div>
           ${statusRow}
         </div>
@@ -69,11 +72,11 @@
 
     els.countPending.textContent = pending.length;
     els.countDone.textContent = done.length;
-    els.countDone2.textContent = done.length;
+    els.doneHeader.textContent = t("doneHeader", { n: done.length });
     els.doneHeader.hidden = done.length === 0;
 
     els.listPending.innerHTML = pending.map((s) => cardHtml(s, false)).join("") ||
-      `<p class="empty-hint">Sem paragens pendentes.</p>`;
+      `<p class="empty-hint">${escapeHtml(t("noPending"))}</p>`;
     els.listDone.innerHTML = done.map((s) => cardHtml(s, true)).join("");
   }
 
@@ -87,7 +90,7 @@
   async function copyAddress(address) {
     try {
       await navigator.clipboard.writeText(address);
-      showToast("Endereço copiado");
+      showToast(t("copied"));
     } catch (_) {
       // Fallback for browsers/contexts without the async Clipboard API.
       const textarea = document.createElement("textarea");
@@ -98,9 +101,9 @@
       textarea.select();
       try {
         document.execCommand("copy");
-        showToast("Endereço copiado");
+        showToast(t("copied"));
       } catch (_) {
-        showToast("Não foi possível copiar");
+        showToast(t("copyFailed"));
       }
       document.body.removeChild(textarea);
     }
@@ -113,7 +116,7 @@
   function openStopModal(stop) {
     modalStopId = stop.id;
     els.modalAddress.textContent = stop.address;
-    els.modalMeta.textContent = stop.deadline ? `Prazo: ${stop.deadline}` : "";
+    els.modalMeta.textContent = stop.deadline ? t("deadline", { time: stop.deadline }) : "";
     els.modalDeliveredBtn.hidden = stop.status === "delivered";
     els.modalFailedBtn.hidden = stop.status === "failed";
     els.stopModal.hidden = false;
@@ -196,7 +199,7 @@
       btn.addEventListener("click", () => {
         els.reasonModal.querySelectorAll(".reason-opt").forEach((b) => b.classList.remove("selected"));
         btn.classList.add("selected");
-        els.reasonFreeText.hidden = btn.getAttribute("data-reason") !== "Outro";
+        els.reasonFreeText.hidden = btn.getAttribute("data-reason") !== "other";
       });
     });
     els.reasonCancelBtn.addEventListener("click", closeReasonModal);
@@ -206,7 +209,9 @@
     els.reasonConfirmBtn.addEventListener("click", () => {
       const selected = els.reasonModal.querySelector(".reason-opt.selected");
       const reason = selected
-        ? (selected.getAttribute("data-reason") === "Outro" ? (els.reasonFreeText.value.trim() || "Outro") : selected.getAttribute("data-reason"))
+        ? (selected.getAttribute("data-reason") === "other"
+            ? (els.reasonFreeText.value.trim() || t("reason_other"))
+            : t("reason_" + selected.getAttribute("data-reason")))
         : "Outro";
       const id = pendingFailId;
       closeReasonModal();
@@ -220,5 +225,5 @@
     wireEvents(document);
   }
 
-  global.RTList = { init, render, showToast, FAIL_REASONS };
+  global.RTList = { init, render, showToast, FAIL_REASON_CODES };
 })(window);

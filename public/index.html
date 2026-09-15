@@ -1909,6 +1909,9 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
       const aliasResult = resolveAlias(addr);
       return aliasResult ? aliasResult.to : addr;
     });
+    // The driver's card shows the dispatcher's text (not the alias
+    // coordinate), and their map follows the same walk-only legs.
+    const restricted = rawAddresses.map(addr => !!findBlockedMatch(addr));
     // buildTextAddresses() returns minutes-since-midnight (or null); the
     // API wants "HH:MM" strings, same as /api/delivery-times.
     const deadlines = deadlineMinutes.map(m => m == null ? null :
@@ -1917,7 +1920,7 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
       const res = await fetch('/api/share/route', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ addresses, deadlines, roundTrip }),
+        body: JSON.stringify({ addresses, deadlines, roundTrip, originalAddresses: rawAddresses, restricted }),
       });
       const data = await res.json();
       if(!res.ok){
