@@ -239,6 +239,11 @@ wget -P switzerland https://download.geofabrik.de/europe/switzerland-latest.osm.
 
 docker run -t -v "${PWD}/switzerland:/data" ghcr.io/project-osrm/osrm-backend \
   osrm-extract -p /opt/car.lua /data/switzerland-latest.osm.pbf
+# Extract needs ~4-6 GB of RAM for Switzerland and dies (sometimes just
+# "Killed") without it — check it finished before going on:
+ls switzerland/switzerland-latest.osrm.ebg
+# No "switzerland-latest.osrm" file is created on current OSRM versions
+# (only .osrm.*) — the next two commands still take that name, on purpose.
 docker run -t -v "${PWD}/switzerland:/data" ghcr.io/project-osrm/osrm-backend \
   osrm-partition /data/switzerland-latest.osrm
 docker run -t -v "${PWD}/switzerland:/data" ghcr.io/project-osrm/osrm-backend \

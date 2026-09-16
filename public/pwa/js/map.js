@@ -112,13 +112,34 @@
     return 2 * R * Math.asin(Math.sqrt(h));
   }
 
-  function markerEl(stop) {
-    const el = document.createElement("div");
-    el.className = "map-pin";
-    el.style.background = statusColor(stop);
-    el.textContent = pinText(stop);
-    if (el.textContent.length > 2) el.classList.add("map-pin-small");
-    return el;
+  // Fills an existing pin element for a stop's current state — shared by
+  // the normal render and the end-of-round replay, which flips pins one
+  // by one as the marker reaches them.
+  // Fills a pin for a stop's current state — shared by the normal render
+  // and the end-of-round replay. `modern` is the replay's look (the
+  // office's "Animar rota" icons): pin-pending.svg with the number,
+  // check-pin.svg once delivered; the normal map keeps its coloured drop
+  // and only ever borrows the red ✗ pin for a failed stop.
+  //
+  // Every marker is anchored at its centre (the round drop sits exactly on
+  // the point, as always); an image pin is pushed up by half its height so
+  // its tip lands on the point instead.
+  const IMAGE_PIN_LIFT = -22; // half of the 44px pin images (failed-pin is 36px — 4px of slack is invisible at this size)
+  function paintPin(marker, stop, modern) {
+    const el = marker.getElement();
+    let cls = "map-pin", text = pinText(stop), offset = [0, 0];
+    if (stop.status === "failed") { cls = "map-pin-failed"; text = ""; offset = [0, -18]; }
+    else if (modern && stop.status === "delivered") { cls = "map-pin-check"; text = ""; offset = [5, IMAGE_PIN_LIFT]; } // pin drawn 5px left of centre in the SVG
+    else if (modern) { cls = "map-pin-pending"; text = String(RTSettings.stopNumber(stop, stops)); offset = [0, IMAGE_PIN_LIFT]; }
+    // Only OUR classes are swapped — MapLibre put its own on this element
+    // (maplibregl-marker: position:absolute + the positioning transform);
+    // overwriting className wiped them and the pins drifted with zoom.
+    el.classList.remove("map-pin", "map-pin-small", "map-pin-failed", "map-pin-check", "map-pin-pending");
+    el.classList.add(cls);
+    el.style.background = cls === "map-pin" ? statusColor(stop) : "";
+    el.textContent = text;
+    if (cls === "map-pin" && text.length > 2) el.classList.add("map-pin-small");
+    marker.setOffset(offset);
   }
 
   function clearMarkers() {
@@ -145,15 +166,24 @@
     list.forEach((stop) => {
       if (typeof stop.lat !== "number" || typeof stop.lng !== "number") return;
       if (excludeStartEnd && stop.isStartEnd) return;
-      const el = markerEl(stop);
+      const el = document.createElement("div");
       el.addEventListener("click", (ev) => {
         ev.stopPropagation();
         if (onMarkerTap) onMarkerTap(stop.id);
       });
       const marker = new maplibregl.Marker({ element: el }).setLngLat([stop.lng, stop.lat]).addTo(map);
+      marker.__stop = stop;
+      paintPin(marker, stop, false);
       markers.push(marker);
     });
   }
+
+  // What replay.js needs and nothing more: the map, the pins (to flip
+  // them as the marker passes), and a way to redraw the real state after.
+  function getMap() { return map; }
+  function getMarkers() { return markers; }
+  function repaintPin(marker, stop) { paintPin(marker, stop, true); }
+  function restoreStops() { renderStops(stops); }
 
   function ensureLineSource(id, paint, layout, casing) {
     if (map.getSource(id)) return;
@@ -373,5 +403,5 @@
     checkArrival();
   }
 
-  global.RTMap = { init, update, startTracking, stopTracking };
+  global.RTMap = { init, update, startTracking, stopTracking, setFollowing, getMap, getMarkers, repaintPin, restoreStops, ROUTE_COLOR, DONE_COLOR };
 })(window);

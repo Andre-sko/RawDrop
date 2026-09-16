@@ -7,7 +7,7 @@
 
   const els = {};
   ["scannerScreen", "scannerVideoWrap", "listScreen", "mapScreen", "video", "canvas", "scanStartBtn", "scanError",
-   "navList", "navMap", "rescanBtn", "syncBadgeBtn",
+   "navList", "navMap", "rescanBtn", "syncBadgeBtn", "finishRoundBtn",
    "counterPending", "counterDone", "countPending", "countDone", "doneHeader", "listPending", "listDone",
    "stopModal", "modalAddress", "modalCopyBtn", "modalMapsLink", "modalMeta", "modalDeliveredBtn", "modalFailedBtn", "modalCancelBtn",
    "reasonModal", "reasonFreeText", "reasonConfirmBtn", "reasonCancelBtn",
@@ -30,20 +30,26 @@
     els.navMap.classList.toggle("active", name === "map");
     document.getElementById("bottomNav").hidden = name === "scanner";
     if (name === "map") ensureMap().then(() => RTMap.startTracking());
-    else if (mapReady) RTMap.stopTracking();
+    else if (mapReady) { RTMap.stopTracking(); RTReplay.stop(); }
   }
 
   function setLoading(on) {
     els.loadingOverlay.hidden = !on;
   }
 
+  // One shared init promise: a second caller (the finish flow right after
+  // showScreen("map")) used to see mapReady=true and carry on before the
+  // style had loaded — addSource on an unloaded map throws, and the
+  // replay never started.
+  let mapInit = null;
   async function ensureMap() {
-    if (mapReady) {
+    if (mapInit) {
+      await mapInit;
       RTMap.update(currentStops, currentRoute && currentRoute.geometry, currentRoute && currentRoute.restrictions);
       return;
     }
     mapReady = true;
-    await RTMap.init(els.mapContainer, {
+    mapInit = RTMap.init(els.mapContainer, {
       onTap: (id) => RTDB.getStop(id).then((stop) => stop && listOpenModal(stop)),
       locateBtn: els.locateBtn,
       satelliteBtn: els.satelliteBtn,
@@ -57,6 +63,7 @@
         return true;
       },
     });
+    await mapInit;
     RTMap.update(currentStops, currentRoute && currentRoute.geometry, currentRoute && currentRoute.restrictions);
   }
 
@@ -75,6 +82,9 @@
     currentStops = await RTDB.getStops();
     RTList.setLegs(currentRoute ? currentRoute.legs : null);
     RTList.render(currentStops);
+    // Every stop closed → the driver ends the round themselves (🏁), which
+    // is what starts the replay + finish screen. "↺ Repor" hides it again.
+    els.finishRoundBtn.hidden = !(currentStops.length && pendingCount(currentStops) === 0);
     if (mapReady) RTMap.update(currentStops, currentRoute && currentRoute.geometry, currentRoute && currentRoute.restrictions);
     const count = await RTDB.countQueue();
     updateSyncBadge(count);
@@ -98,6 +108,14 @@
   // it — while the stop itself only keeps the label-worthy part.
   async function setStopStatus(id, status, reason, proof) {
     const clientTimestamp = new Date().toISOString();
+    // The round starts at the first mark, not at the scan — the list is
+    // often imported long before the van leaves.
+    if (currentRoute && !currentRoute.startedAt && status !== "pending") {
+      currentRoute.startedAt = clientTimestamp;
+      const stored = await RTDB.getRoute();
+      if (stored) await RTDB.saveRoute({ ...stored, startedAt: clientTimestamp });
+    }
+
     await RTDB.updateStopAndEnqueue(
       id,
       { status, statusReason: reason || null, clientTimestamp, dirty: true, proof: proof ? { type: proof.type, name: proof.name } : null },
@@ -105,6 +123,26 @@
     );
     await refresh();
     RTSync.kick();
+  }
+
+  // 🏁 Terminar volta: jump to the map, replay the whole round at 4x
+  // (skippable), then the finish screen. No line to replay → straight to
+  // the finish screen.
+  async function endOfRound() {
+    const geometry = currentRoute && currentRoute.geometry;
+    if (!geometry || !geometry.coordinates || geometry.coordinates.length < 2) { RTFinish.show(currentRoute, currentStops); return; }
+    showScreen("map");
+    await ensureMap();
+    // showScreen("map") starts GPS tracking in its own .then — let that
+    // land first, then the replay pauses it (replay.js) for the duration;
+    // tracking resumes once the finish screen is closed (RTFinish onClose).
+    await new Promise((r) => setTimeout(r, 0));
+    RTReplay.play(geometry, () => RTFinish.show(currentRoute, currentStops));
+  }
+
+  function pendingCount(stops) {
+    const exclude = RTSettings.get("excludeStartEnd");
+    return stops.filter((s) => s.status === "pending" && !(exclude && s.isStartEnd)).length;
   }
 
   // A live update (applyRouteUpdate) can renumber every id while the
@@ -132,9 +170,9 @@
   async function applyRouteUpdate(data) {
     if (!currentRoute || !data || data.token !== currentRoute.token) return;
     const before = currentStops.map((s) => s.id).join("|");
-    await RTDB.saveRoute({ token: data.token, expiresAt: data.expiresAt, roundTrip: data.route.roundTrip, createdAt: data.route.createdAt, geometry: data.route.geometry, legs: data.route.legs || [], restrictions: data.route.restrictions || [] });
+    await RTDB.saveRoute({ token: data.token, expiresAt: data.expiresAt, roundTrip: data.route.roundTrip, createdAt: data.route.createdAt, startedAt: currentRoute.startedAt || null, plannedSeconds: data.route.plannedSeconds || null, geometry: data.route.geometry, legs: data.route.legs || [], restrictions: data.route.restrictions || [] });
     await RTDB.replaceStops(data.stops);
-    currentRoute = { token: data.token, expiresAt: data.expiresAt, geometry: data.route.geometry, legs: data.route.legs || [], restrictions: data.route.restrictions || [] };
+    currentRoute = { token: data.token, expiresAt: data.expiresAt, plannedSeconds: data.route.plannedSeconds || null, startedAt: currentRoute && currentRoute.token === data.token ? currentRoute.startedAt : null, geometry: data.route.geometry, legs: data.route.legs || [], restrictions: data.route.restrictions || [] };
     await refresh();
     if (currentStops.map((s) => s.id).join("|") !== before) RTList.showToast(RTI18n.t("routeUpdated"));
   }
@@ -174,14 +212,14 @@
       await RTDB.clearAll();
     }
 
-    await RTDB.saveRoute({ token: data.token, expiresAt: data.expiresAt, roundTrip: data.route.roundTrip, createdAt: data.route.createdAt, geometry: data.route.geometry, legs: data.route.legs || [], restrictions: data.route.restrictions || [] });
+    await RTDB.saveRoute({ token: data.token, expiresAt: data.expiresAt, roundTrip: data.route.roundTrip, createdAt: data.route.createdAt, plannedSeconds: data.route.plannedSeconds || null, geometry: data.route.geometry, legs: data.route.legs || [], restrictions: data.route.restrictions || [] });
     // The server's order is final — never re-sorted or re-numbered here.
     await RTDB.saveStops(data.stops.map((s) => ({ ...s, dirty: false })));
 
-    currentRoute = { token: data.token, expiresAt: data.expiresAt, geometry: data.route.geometry, legs: data.route.legs || [], restrictions: data.route.restrictions || [] };
+    currentRoute = { token: data.token, expiresAt: data.expiresAt, plannedSeconds: data.route.plannedSeconds || null, startedAt: currentRoute && currentRoute.token === data.token ? currentRoute.startedAt : null, geometry: data.route.geometry, legs: data.route.legs || [], restrictions: data.route.restrictions || [] };
     RTSync.setToken(data.token);
     RTSync.startLive(data.token, applyRouteUpdate);
-    mapReady = false; // force RTMap.init() again if a previous route had already built the map
+    mapReady = false; mapInit = null; // force RTMap.init() again if a previous route had already built the map
     setLoading(false);
     history.replaceState(null, "", "/pwa/");
     await refresh();
@@ -294,6 +332,7 @@
     els.excludeStartEndToggle.addEventListener("change", (ev) => {
       RTSettings.set("excludeStartEnd", ev.target.checked);
       RTList.render(currentStops);
+      els.finishRoundBtn.hidden = !(currentStops.length && pendingCount(currentStops) === 0);
       if (mapReady) RTMap.update(currentStops, currentRoute && currentRoute.geometry, currentRoute && currentRoute.restrictions);
     });
 
@@ -357,6 +396,17 @@
       sigCancelBtn: els.sigCancelBtn, sigConfirmBtn: els.sigConfirmBtn, photoInput: els.photoInput,
     });
     wireNav();
+    RTReplay.init({ overlay: document.getElementById("replayOverlay"), skipBtn: document.getElementById("replaySkipBtn") });
+    RTFinish.init({
+      screen: document.getElementById("finishScreen"), title: document.getElementById("finishTitle"),
+      elapsed: document.getElementById("finishElapsed"), compare: document.getElementById("finishCompare"),
+      counts: document.getElementById("finishCounts"), closeBtn: document.getElementById("finishCloseBtn"),
+    }, { onClose: () => { if (!els.mapScreen.hidden) { RTMap.setFollowing(true); RTMap.startTracking(); } } });
+    els.finishRoundBtn.addEventListener("click", endOfRound);
+    // 🏁 on the map's next-stop bar does the same once the round is done.
+    els.nextStopBar.addEventListener("click", () => {
+      if (currentStops.length && pendingCount(currentStops) === 0) endOfRound();
+    });
     RTSync.onQueueChange(updateSyncBadge);
     RTSync.start();
 

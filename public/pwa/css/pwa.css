@@ -594,3 +594,81 @@ input, select, button { font-size: max(16px, 1em); }
 .sig-actions .btn-ok-lg:disabled { opacity: 0.4; cursor: default; }
 /* Not display:none — iOS Safari ignores .click() on a hidden file input. */
 .offscreen-input { position: fixed; left: -9999px; top: 0; width: 1px; height: 1px; opacity: 0; }
+
+/* --- end of round (js/finish.js) ---------------------------------------- */
+.finish-screen {
+  position: fixed; inset: 0; z-index: 70;
+  display: flex; flex-direction: column; align-items: center; justify-content: center;
+  gap: 10px; padding: 24px; text-align: center;
+  background: var(--bg); color: var(--text);
+}
+.finish-screen[hidden] { display: none; }
+.finish-icon-wrap { position: relative; width: 140px; height: 140px; margin-bottom: 12px; }
+.finish-icon { width: 140px; height: 140px; fill: var(--ok); filter: drop-shadow(0 6px 18px rgba(76,175,110,0.45)); }
+.finish-ring {
+  position: absolute; inset: 0; border-radius: 50%;
+  border: 3px solid var(--ok); opacity: 0;
+}
+.finish-animate .finish-icon { animation: finish-pop 0.7s cubic-bezier(0.34, 1.56, 0.64, 1) both; }
+.finish-animate .finish-ring { animation: finish-ring 1s ease-out 0.25s both; }
+.finish-animate .finish-title, .finish-animate .finish-elapsed, .finish-animate .finish-compare, .finish-animate .finish-counts {
+  animation: finish-rise 0.5s ease-out both;
+}
+.finish-animate .finish-elapsed { animation-delay: 0.35s; }
+.finish-animate .finish-compare { animation-delay: 0.5s; }
+.finish-animate .finish-counts { animation-delay: 0.65s; }
+@keyframes finish-pop { 0% { transform: scale(0); opacity: 0; } 60% { transform: scale(1.15); opacity: 1; } 100% { transform: scale(1); } }
+@keyframes finish-ring { 0% { transform: scale(0.6); opacity: 0.9; } 100% { transform: scale(1.8); opacity: 0; } }
+@keyframes finish-rise { 0% { transform: translateY(12px); opacity: 0; } 100% { transform: translateY(0); opacity: 1; } }
+.finish-title { font-size: 22px; margin: 0; }
+.finish-elapsed { font-size: 18px; }
+.finish-compare { font-size: 16px; color: var(--muted); }
+.finish-compare.faster { color: var(--ok); font-weight: 700; }
+.finish-compare.slower { color: var(--accent); font-weight: 700; }
+.finish-counts { font-size: 14px; color: var(--muted); margin-bottom: 16px; }
+.finish-screen .btn-ghost-lg { min-width: 200px; }
+@media (prefers-reduced-motion: reduce) { .finish-animate * { animation: none !important; } }
+
+/* --- failed stop pin (image) + end-of-round replay (js/replay.js) ------- */
+.map-pin-failed, .map-pin-check {
+  width: 36px; height: 36px;
+  background: url("/pwa/icons/failed-pin.png") center / contain no-repeat;
+  filter: drop-shadow(0 2px 4px rgba(0,0,0,0.45));
+}
+/* check-pin.svg draws its pin left of centre (tip at x=198.7 of 512) to
+   leave room for the ✓ roundel — the marker's offset (map.js repaintPin)
+   shifts it so the tip sits on the point; a CSS transform here would be
+   overwritten by MapLibre's own positioning transform. */
+.map-pin-check { width: 44px; height: 44px; background-image: url("/pwa/icons/check-pin.svg"); }
+/* pin-pending.svg: number sits in the roundel, centred 198.7/512 of the
+   height from the top → 17px of a 44px pin. */
+.map-pin-pending {
+  width: 44px; height: 44px;
+  background: url("/pwa/icons/pin-pending.svg") center / contain no-repeat;
+  filter: drop-shadow(0 2px 4px rgba(0,0,0,0.45));
+  display: flex; justify-content: center; align-items: flex-start; padding-top: 10px; box-sizing: border-box;
+  color: #171D26; font-weight: 800; font-size: 11px; line-height: 14px;
+}
+.replay-dot {
+  width: 18px; height: 18px; border-radius: 50%;
+  background: var(--ok); border: 3px solid #fff;
+  box-shadow: 0 0 0 6px rgba(76,175,110,0.35), 0 2px 6px rgba(0,0,0,0.4);
+}
+.replay-overlay {
+  position: absolute; left: 0; right: 0; bottom: calc(16px + env(safe-area-inset-bottom)); z-index: 12;
+  display: flex; justify-content: center;
+  pointer-events: none;
+}
+.replay-overlay[hidden] { display: none; }
+.replay-skip {
+  pointer-events: auto; min-height: 44px; padding: 0 16px; border-radius: 999px;
+  border: 1px solid var(--border); background: var(--panel); color: var(--text); font-size: 15px; font-weight: 700;
+}
+
+/* "Terminar volta" — shown once every stop is closed (js/app.js) */
+.finish-round-btn {
+  margin: 10px 12px 0; width: calc(100% - 24px); min-height: 52px;
+  border-radius: 12px; border: none; background: var(--ok); color: #06210F;
+  font-size: 16px; font-weight: 800; cursor: pointer;
+}
+.finish-round-btn[hidden] { display: none; }

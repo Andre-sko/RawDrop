@@ -235,3 +235,14 @@ describe("legs", () => {
     assert.deepStrictEqual(makeShare().legs, []);
   });
 });
+
+describe("plannedSeconds", () => {
+  test("kept (rounded) when positive, null otherwise, and replaced on re-share", () => {
+    const share = makeShare({ plannedSeconds: 3600.4 });
+    assert.strictEqual(share.plannedSeconds, 3600);
+    assert.strictEqual(makeShare().plannedSeconds, null);
+    assert.strictEqual(makeShare({ plannedSeconds: -5 }).plannedSeconds, null);
+    const updated = replaceRouteShareStops(share.token, { addresses: ["Rua A 1"], plannedSeconds: 1800 });
+    assert.strictEqual(updated.plannedSeconds, 1800);
+  });
+});

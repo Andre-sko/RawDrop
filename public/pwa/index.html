@@ -49,6 +49,7 @@
       <button id="syncBadgeBtn" class="sync-badge" hidden></button>
     </header>
     <div id="expiredBanner" class="warn-banner" data-i18n="expired" hidden>Esta rota expirou — as novas marcações podem não sincronizar.</div>
+    <button id="finishRoundBtn" class="finish-round-btn" type="button" data-i18n="finishRoundBtn" hidden>🏁 Terminar volta</button>
     <div id="listPending" class="stop-section"></div>
     <div class="stop-section-header" id="doneHeader" hidden></div>
     <div id="listDone" class="stop-section"></div>
@@ -60,6 +61,9 @@
     <div id="nextStopBar" class="next-stop-bar" hidden></div>
     <button id="satelliteBtn" class="map-style-btn" data-i18n-title="satelliteTitle" title="Vista de satélite">🛰️</button>
     <button id="locateBtn" class="map-locate-btn" data-i18n-title="locateTitle" title="Centrar na minha localização">🎯</button>
+    <div id="replayOverlay" class="replay-overlay" hidden>
+      <button id="replaySkipBtn" class="replay-skip" type="button" data-i18n="replaySkip">✕ Saltar</button>
+    </div>
   </section>
 
   <!-- Bottom nav -->
@@ -121,6 +125,18 @@
       <button id="sigClearBtn" class="btn-ghost-lg" data-i18n="clear">Limpar</button>
       <button id="sigConfirmBtn" class="btn-ok-lg" data-i18n="confirm" disabled>Confirmar</button>
     </div>
+  </div>
+  <!-- End of round — js/finish.js -->
+  <div id="finishScreen" class="finish-screen" hidden>
+    <div class="finish-icon-wrap">
+      <span class="finish-ring"></span>
+      <svg class="finish-icon" viewBox="0 0 42 42" aria-hidden="true"><path d="M21,0A21,21,0,1,0,42,21,21,21,0,0,0,21,0Zm0,38.07A17.07,17.07,0,1,1,38.07,21,17.09,17.09,0,0,1,21,38.07Z"/><path d="M27.63,15.54L18.45,24.2l-4-4.12a2,2,0,0,0-2.87,2.79l5.4,5.55a2,2,0,0,0,2.81.05l10.58-10a2,2,0,0,0-2.74-2.91Z"/></svg>
+    </div>
+    <h2 id="finishTitle" class="finish-title"></h2>
+    <div id="finishElapsed" class="finish-elapsed"></div>
+    <div id="finishCompare" class="finish-compare"></div>
+    <div id="finishCounts" class="finish-counts"></div>
+    <button id="finishCloseBtn" class="btn-ghost-lg" data-i18n="close">Fechar</button>
   </div>
   <input id="photoInput" type="file" accept="image/*" capture="environment" class="offscreen-input" tabindex="-1" aria-hidden="true" />
 
@@ -200,6 +216,8 @@
 <script src="/pwa/js/scanner.js"></script>
 <script src="/pwa/js/list.js"></script>
 <script src="/pwa/js/proof.js"></script>
+<script src="/pwa/js/replay.js"></script>
+<script src="/pwa/js/finish.js"></script>
 <script src="/pwa/js/map.js"></script>
 <script src="/pwa/js/app.js"></script>
 </body>

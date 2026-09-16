@@ -1938,6 +1938,12 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
     // Today's link, so a re-share after a change updates the phone in
     // place (SSE) instead of handing out a new QR — the server falls back
     // to a fresh share when this token is gone or expired.
+    // The forecast the driver is measured against at the end of the round
+    // — same sum the totals panel shows (renderTotals): driving + time at
+    // each stop + break. null when no route was calculated yet.
+    const plannedSeconds = lastRouteData
+      ? Math.round(lastRouteData.totalSeconds + (lastRouteData.stopMinutes * (lastRouteData.labels.length - 1) + lastRouteData.breakMinutes) * 60)
+      : null;
     let token = null;
     if(mode === 'update'){
       try{ token = localStorage.getItem(DRIVER_SHARE_TOKEN_KEY) || null; } catch(e){ /* ignora */ }
@@ -1950,7 +1956,7 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
       const res = await fetch('/api/share/route', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ addresses, deadlines, roundTrip, originalAddresses: rawAddresses, restricted, token }),
+        body: JSON.stringify({ addresses, deadlines, roundTrip, originalAddresses: rawAddresses, restricted, token, plannedSeconds }),
       });
       const data = await res.json();
       if(!res.ok){

@@ -14,6 +14,7 @@
 //   {
 //     token: string,               // 32 random bytes, hex — the ONLY access control
 //     roundTrip: boolean,
+//     plannedSeconds: number | null,  // office's forecast for the whole round (driving + stops + break), for the end-of-round screen
 //     createdAt: string (ISO),
 //     expiresAt: string (ISO),
 //     geometry: GeoJSON LineString | null,  // driving geometry for the map screen, best-effort
@@ -182,13 +183,14 @@ function buildStops({ addresses, coords, deadlines, roundTrip, originalAddresses
 }
 
 function createRouteShare(params) {
-  const { roundTrip, geometry, legs, restrictions } = params;
+  const { roundTrip, geometry, legs, restrictions, plannedSeconds } = params;
   const now = Date.now();
   const stops = buildStops(params);
 
   const entry = {
     token: generateShareToken(),
     roundTrip: !!roundTrip,
+    plannedSeconds: Number.isFinite(plannedSeconds) && plannedSeconds > 0 ? Math.round(plannedSeconds) : null,
     createdAt: new Date(now).toISOString(),
     expiresAt: new Date(now + ROUTE_SHARE_TTL_MS).toISOString(),
     // Best-effort driving geometry for the map screen (Phase 2) — a
@@ -236,6 +238,7 @@ function replaceRouteShareStops(token, params) {
   }
 
   share.roundTrip = !!params.roundTrip;
+  share.plannedSeconds = Number.isFinite(params.plannedSeconds) && params.plannedSeconds > 0 ? Math.round(params.plannedSeconds) : null;
   share.geometry = params.geometry || null;
   share.legs = Array.isArray(params.legs) ? params.legs : [];
   share.restrictions = Array.isArray(params.restrictions) ? params.restrictions : [];

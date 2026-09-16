@@ -16,7 +16,7 @@
 // answer (or a real failure the app's own sync queue can react to), not
 // a stale cached one.
 
-const SHELL_CACHE_NAME = "rt-pwa-shell-v10";
+const SHELL_CACHE_NAME = "rt-pwa-shell-v21";
 const TILE_CACHE_NAME = "rt-pwa-tiles-v1";
 
 const SHELL_FILES = [
@@ -32,6 +32,11 @@ const SHELL_FILES = [
   "/pwa/js/scanner.js",
   "/pwa/js/list.js",
   "/pwa/js/proof.js",
+  "/pwa/js/replay.js",
+  "/pwa/js/finish.js",
+  "/pwa/icons/failed-pin.png",
+  "/pwa/icons/check-pin.svg",
+  "/pwa/icons/pin-pending.svg",
   "/pwa/js/map.js",
   "/pwa/js/app.js",
   "/pwa/icons/icon-192.png",

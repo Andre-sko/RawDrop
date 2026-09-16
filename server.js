@@ -341,7 +341,7 @@ function sharePayload(share) {
   return {
     token: share.token,
     expiresAt: share.expiresAt,
-    route: { roundTrip: share.roundTrip, createdAt: share.createdAt, geometry: share.geometry, legs: share.legs || [], restrictions: share.restrictions || [] },
+    route: { roundTrip: share.roundTrip, createdAt: share.createdAt, plannedSeconds: share.plannedSeconds || null, geometry: share.geometry, legs: share.legs || [], restrictions: share.restrictions || [] },
     stops: share.stops,
   };
 }
@@ -864,7 +864,7 @@ app.post("/api/share-export", async (req, res) => {
 // after the auth middleware); the two endpoints the resulting link is
 // for do not, on purpose — see their own comments near GET /shared/:token.
 app.post("/api/share/route", async (req, res) => {
-  const { addresses, roundTrip, deadlines, originalAddresses, restricted, token } = req.body || {};
+  const { addresses, roundTrip, deadlines, originalAddresses, restricted, token, plannedSeconds } = req.body || {};
   if (!Array.isArray(addresses) || addresses.length === 0 || addresses.some((a) => typeof a !== "string" || !a.trim())) {
     return res.status(400).json({ error: "addresses tem de ser uma lista de texto nao vazia" });
   }
@@ -929,7 +929,7 @@ app.post("/api/share/route", async (req, res) => {
   const depositFlags = addresses.map((a, i) => depositKeys.has(normalizeKey((originals && originals[i]) || a)));
 
   const shareParams = {
-    addresses, coords, deadlines, roundTrip, geometry, legs,
+    addresses, coords, deadlines, roundTrip, geometry, legs, plannedSeconds,
     originalAddresses: originals, restrictedFlags, depositFlags, restrictions: restrictionsForDriver,
   };
   // `token`: the office re-sharing today's link after a change — the
