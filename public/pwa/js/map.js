@@ -24,7 +24,7 @@
 
   const PENDING_COLOR = "#E8A33D";
   const WALK_COLOR = "#5B8FD6";
-  const DONE_COLOR = "#4A5568";
+  const DONE_COLOR = "#4CAF6E";
   const FAILED_COLOR = "#E2665B";
   const RESTRICTION_COLOR = "#E2665B";
 
@@ -36,12 +36,42 @@
 
   const t = (k, v) => (global.RTI18n ? RTI18n.t(k, v) : k);
 
+  // Base map styles — 'dark' is RTConfig's usual vector style, 'satellite'
+  // reuses the same key-free Esri raster tiles as the office app's map
+  // (public/js/map.js) for a consistent look between the two apps.
+  const MAP_STYLE_STORAGE_KEY = "route-tracker-pwa-map-style";
+  const SATELLITE_TILES = {
+    tiles: ["https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"],
+    attribution: "Tiles &copy; Esri — Source: Esri, Maxar, Earthstar Geographics, and the GIS User Community",
+  };
+
+  function buildStyle(id) {
+    if (id === "satellite") {
+      return {
+        version: 8,
+        sources: { "base-raster": { type: "raster", tiles: SATELLITE_TILES.tiles, tileSize: 256, attribution: SATELLITE_TILES.attribution } },
+        layers: [{ id: "base-raster-layer", type: "raster", source: "base-raster" }],
+      };
+    }
+    return RTConfig.getMapStyleUrl();
+  }
+
+  function loadStoredStyle() {
+    try {
+      return localStorage.getItem(MAP_STYLE_STORAGE_KEY) === "dark" ? "dark" : "satellite";
+    } catch (_) { return "satellite"; }
+  }
+
   let map = null;
   let markers = [];
   let onMarkerTap = null;
   let onArrive = null;
   let nextStopBar = null;
   let locateBtn = null;
+  let satelliteBtn = null;
+  let mapStyle = loadStoredStyle();
+  let lastGeometry = null;
+  let lastRestrictions = null;
 
   let stops = [];
   let meMarker = null;
@@ -97,8 +127,10 @@
   function renderStops(list) {
     if (!map) return;
     clearMarkers();
+    const excludeStartEnd = RTSettings.get("excludeStartEnd");
     list.forEach((stop) => {
       if (typeof stop.lat !== "number" || typeof stop.lng !== "number") return;
+      if (excludeStartEnd && stop.isStartEnd) return;
       const el = markerEl(stop);
       el.addEventListener("click", (ev) => {
         ev.stopPropagation();
@@ -116,11 +148,13 @@
   }
 
   function renderGeometry(geometry) {
+    lastGeometry = geometry;
     ensureLineSource("route-line", { "line-color": PENDING_COLOR, "line-width": 4, "line-opacity": 0.85 });
     map.getSource("route-line").setData({ type: "Feature", geometry: geometry || { type: "LineString", coordinates: [] }, properties: {} });
   }
 
   function renderRestrictions(restrictions) {
+    lastRestrictions = restrictions;
     ensureLineSource("restrictions", { "line-color": RESTRICTION_COLOR, "line-width": 6, "line-dasharray": [0.2, 1.6] });
     if (!map.getLayer("restrictions-label-layer")) {
       map.addLayer({
@@ -134,11 +168,32 @@
     });
   }
 
+  // setStyle() wipes every source/layer that isn't part of the new style
+  // (route-line, restrictions) — markers survive since they're plain DOM
+  // overlays, not style layers, so only those two need re-adding once the
+  // new style has finished loading.
+  function setMapStyle(id) {
+    if (!map || (id !== "dark" && id !== "satellite")) return;
+    mapStyle = id;
+    try { localStorage.setItem(MAP_STYLE_STORAGE_KEY, id); } catch (_) { /* private browsing etc */ }
+    if (satelliteBtn) satelliteBtn.classList.toggle("active", id === "satellite");
+    // Listener registered BEFORE setStyle() on purpose — a raster style
+    // like this one has no remote JSON to fetch, so it can finish loading
+    // synchronously inside setStyle() itself; attaching .once() after the
+    // call would miss an event that already fired.
+    map.once("style.load", () => {
+      renderGeometry(lastGeometry);
+      renderRestrictions(lastRestrictions);
+    });
+    map.setStyle(buildStyle(id));
+  }
+
   // ---- tracking ----------------------------------------------------------
 
   function nextPendingStop() {
     return stops
       .filter((s) => s.status === "pending" && typeof s.lat === "number" && typeof s.lng === "number")
+      .filter((s) => !(RTSettings.get("excludeStartEnd") && s.isStartEnd))
       .sort((a, b) => a.order - b.order)[0] || null;
   }
 
@@ -247,8 +302,15 @@
   }
 
   function startTracking() {
-    if (!navigator.geolocation || watchId !== null) return;
-    watchId = navigator.geolocation.watchPosition(onPosition, () => { /* denied/unavailable — the map still works, just without the dot */ }, {
+    if (!navigator.geolocation) { console.error("RTMap: navigator.geolocation indisponivel (contexto inseguro? precisa de https)"); return; }
+    if (watchId !== null) return;
+    watchId = navigator.geolocation.watchPosition(onPosition, (err) => {
+      // 1 = PERMISSION_DENIED, 2 = POSITION_UNAVAILABLE, 3 = TIMEOUT — the
+      // map still works without the dot, but this is otherwise invisible:
+      // "a espera de GPS" looks identical whether it's permission, a bad
+      // fix, or the page not being served over https.
+      console.error(`RTMap: geolocation falhou (code=${err.code} ${err.message})`);
+    }, {
       enableHighAccuracy: true, maximumAge: 2000, timeout: 15000,
     });
     updateNextStopBar();
@@ -259,12 +321,13 @@
     watchId = null;
   }
 
-  function init(container, { onTap, locateBtn: locate, nextStopBar: bar, onArrive: arrive }) {
+  function init(container, { onTap, locateBtn: locate, satelliteBtn: satellite, nextStopBar: bar, onArrive: arrive }) {
     onMarkerTap = onTap;
     onArrive = arrive || null;
     nextStopBar = bar || null;
     locateBtn = locate || null;
-    map = new maplibregl.Map({ container, style: RTConfig.getMapStyleUrl(), center: [0, 0], zoom: 2, attributionControl: false });
+    satelliteBtn = satellite || null;
+    map = new maplibregl.Map({ container, style: buildStyle(mapStyle), center: [0, 0], zoom: 2, attributionControl: false });
     map.addControl(new maplibregl.AttributionControl({ compact: true }), "bottom-right");
     map.addControl(new maplibregl.NavigationControl({ showCompass: false }), "top-right");
     // The driver panning/zooming by hand means "let me look" — stop
@@ -272,6 +335,10 @@
     // originalEvent on real gestures, never on our own easeTo/fitBounds.
     map.on("movestart", (e) => { if (e.originalEvent && !programmaticMove) setFollowing(false); });
     if (locateBtn) locateBtn.addEventListener("click", () => { setFollowing(!following); if (following && !lastFix) startTracking(); });
+    if (satelliteBtn) {
+      satelliteBtn.classList.toggle("active", mapStyle === "satellite");
+      satelliteBtn.addEventListener("click", () => setMapStyle(mapStyle === "satellite" ? "dark" : "satellite"));
+    }
     setFollowing(true);
     return new Promise((resolve) => map.on("load", resolve));
   }

@@ -8,11 +8,11 @@
   const els = {};
   ["scannerScreen", "scannerVideoWrap", "listScreen", "mapScreen", "video", "canvas", "scanStartBtn", "scanError",
    "navList", "navMap", "rescanBtn", "syncBadgeBtn",
-   "countPending", "countDone", "doneHeader", "listPending", "listDone",
+   "counterPending", "counterDone", "countPending", "countDone", "doneHeader", "listPending", "listDone",
    "stopModal", "modalAddress", "modalMeta", "modalDeliveredBtn", "modalFailedBtn", "modalCancelBtn",
    "reasonModal", "reasonFreeText", "reasonConfirmBtn", "reasonCancelBtn",
-   "toast", "mapContainer", "locateBtn", "nextStopBar", "expiredBanner", "loadingOverlay",
-   "settingsBtn", "settingsModal", "settingsCloseBtn", "autoArriveToggle"]
+   "toast", "mapContainer", "locateBtn", "satelliteBtn", "nextStopBar", "expiredBanner", "loadingOverlay",
+   "settingsBtn", "settingsModal", "settingsCloseBtn", "autoArriveToggle", "excludeStartEndToggle", "enableLocationBtn", "enableCameraBtn"]
     .forEach((id) => { els[id] = document.getElementById(id); });
 
   let currentStops = [];
@@ -43,6 +43,7 @@
     await RTMap.init(els.mapContainer, {
       onTap: (id) => RTDB.getStop(id).then((stop) => stop && listOpenModal(stop)),
       locateBtn: els.locateBtn,
+      satelliteBtn: els.satelliteBtn,
       nextStopBar: els.nextStopBar,
       // GPS says we've reached the next pending stop: open its
       // Entregue/Falhou modal without the driver having to find the card.
@@ -82,15 +83,21 @@
     els.syncBadgeBtn.textContent = RTI18n.t("syncBadge", { n: count });
   }
 
-  // The one place a stop's status actually changes: write local first
-  // (so the UI and IndexedDB agree immediately, even with zero
-  // connectivity), THEN queue it for the server. See sync.js for what
-  // happens to the queue from here.
+  // The one place a stop's status actually changes: writes the local
+  // status AND queues it for the server in one atomic IndexedDB
+  // transaction (RTDB.updateStopAndEnqueue) — so a process kill (app
+  // backgrounded for hours on a shift) can never leave a stop marked
+  // delivered locally with nothing queued to tell the server about it.
+  // See sync.js for what happens to the queue from here.
   async function setStopStatus(id, status, reason) {
     const clientTimestamp = new Date().toISOString();
-    await RTDB.updateStopLocal(id, { status, statusReason: reason || null, clientTimestamp, dirty: true });
+    await RTDB.updateStopAndEnqueue(
+      id,
+      { status, statusReason: reason || null, clientTimestamp, dirty: true },
+      { stopId: id, status, reason: reason || null, clientTimestamp }
+    );
     await refresh();
-    await RTSync.enqueueStatusChange({ stopId: id, status, reason, clientTimestamp });
+    RTSync.kick();
   }
 
   function friendlyImportError(status, networkFailed) {
@@ -196,14 +203,70 @@
     navigator.serviceWorker.register("/pwa/sw.js").catch(() => { /* offline shell just won't be cached — the app still works online */ });
   }
 
+  // Reflects the browser's actual, current permission state on each
+  // button — "granted" turns it green with a checkmark instead of the
+  // "Ativar" label — via the Permissions API. There is no API to reset a
+  // decision from here: 'camera' isn't even a queryable name in every
+  // browser (Firefox/Safari), so unsupported queries just leave the
+  // button at its default "Ativar" rather than claiming a state we can't
+  // actually confirm.
+  function setPermissionButtonState(btn, granted) {
+    btn.classList.toggle("granted", granted);
+    btn.textContent = granted ? RTI18n.t("permissionGranted") : RTI18n.t("settingActivate");
+  }
+
+  async function refreshPermissionButtons() {
+    if (!navigator.permissions || !navigator.permissions.query) return;
+    try {
+      const geo = await navigator.permissions.query({ name: "geolocation" });
+      setPermissionButtonState(els.enableLocationBtn, geo.state === "granted");
+      geo.onchange = () => setPermissionButtonState(els.enableLocationBtn, geo.state === "granted");
+    } catch (_) { /* query itself unsupported — leave default */ }
+    try {
+      const cam = await navigator.permissions.query({ name: "camera" });
+      setPermissionButtonState(els.enableCameraBtn, cam.state === "granted");
+      cam.onchange = () => setPermissionButtonState(els.enableCameraBtn, cam.state === "granted");
+    } catch (_) { /* 'camera' isn't a valid query name in Firefox/Safari */ }
+  }
+
   function wireSettings() {
     els.settingsBtn.addEventListener("click", () => {
       els.autoArriveToggle.checked = RTSettings.get("autoArrive");
+      els.excludeStartEndToggle.checked = RTSettings.get("excludeStartEnd");
       els.settingsModal.hidden = false;
+      refreshPermissionButtons();
     });
     els.settingsCloseBtn.addEventListener("click", () => { els.settingsModal.hidden = true; });
     els.settingsModal.addEventListener("click", (ev) => { if (ev.target === els.settingsModal) els.settingsModal.hidden = true; });
     els.autoArriveToggle.addEventListener("change", (ev) => RTSettings.set("autoArrive", ev.target.checked));
+    els.excludeStartEndToggle.addEventListener("change", (ev) => {
+      RTSettings.set("excludeStartEnd", ev.target.checked);
+      RTList.render(currentStops);
+      if (mapReady) RTMap.update(currentStops, currentRoute && currentRoute.geometry, currentRoute && currentRoute.restrictions);
+    });
+
+    // Both buttons also trigger the browser's own permission prompt (or
+    // confirm it's already granted) — there is no API to flip a denied
+    // permission back on from JS, only to ask the user to do it in their
+    // browser/phone settings, which is what the "denied" toast says.
+    els.enableLocationBtn.addEventListener("click", () => {
+      if (!navigator.geolocation) { RTList.showToast(RTI18n.t("permissionLocationError")); return; }
+      navigator.geolocation.getCurrentPosition(
+        () => { setPermissionButtonState(els.enableLocationBtn, true); RTList.showToast(RTI18n.t("permissionLocationOk")); },
+        (err) => RTList.showToast(RTI18n.t(err.code === 1 ? "permissionLocationDenied" : "permissionLocationError")),
+        { enableHighAccuracy: true, timeout: 15000 }
+      );
+    });
+    els.enableCameraBtn.addEventListener("click", async () => {
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: "environment" } });
+        stream.getTracks().forEach((track) => track.stop()); // just confirming access, not actually scanning here
+        setPermissionButtonState(els.enableCameraBtn, true);
+        RTList.showToast(RTI18n.t("permissionCameraOk"));
+      } catch (err) {
+        RTList.showToast(RTI18n.t("permissionCameraDenied"));
+      }
+    });
   }
 
   function wireLanguage() {
@@ -216,6 +279,7 @@
       selects.forEach((sel) => { sel.value = RTI18n.getLang(); });
       RTList.render(currentStops);
       updateSyncBadge(lastSyncCount);
+      if (!els.settingsModal.hidden) refreshPermissionButtons(); // re-label "Ativo"/"Enabled" in the new language
     });
   }
 
@@ -224,7 +288,7 @@
     wireSettings();
     registerServiceWorker();
     RTList.init(
-      { countPending: els.countPending, countDone: els.countDone, doneHeader: els.doneHeader, listPending: els.listPending, listDone: els.listDone, toast: els.toast, stopModal: els.stopModal, modalAddress: els.modalAddress, modalMeta: els.modalMeta, modalDeliveredBtn: els.modalDeliveredBtn, modalFailedBtn: els.modalFailedBtn, modalCancelBtn: els.modalCancelBtn, reasonModal: els.reasonModal, reasonFreeText: els.reasonFreeText, reasonConfirmBtn: els.reasonConfirmBtn, reasonCancelBtn: els.reasonCancelBtn },
+      { counterPending: els.counterPending, counterDone: els.counterDone, countPending: els.countPending, countDone: els.countDone, doneHeader: els.doneHeader, listPending: els.listPending, listDone: els.listDone, toast: els.toast, stopModal: els.stopModal, modalAddress: els.modalAddress, modalMeta: els.modalMeta, modalDeliveredBtn: els.modalDeliveredBtn, modalFailedBtn: els.modalFailedBtn, modalCancelBtn: els.modalCancelBtn, reasonModal: els.reasonModal, reasonFreeText: els.reasonFreeText, reasonConfirmBtn: els.reasonConfirmBtn, reasonCancelBtn: els.reasonCancelBtn },
       {
         onMarkStop: setStopStatus,
         onUndo: (id) => setStopStatus(id, "pending", null),
@@ -247,6 +311,11 @@
     if (stored) {
       currentRoute = stored;
       RTSync.setToken(stored.token);
+      // Belt-and-suspenders for the same gap updateStopAndEnqueue() closes
+      // going forward — re-queues any stop still marked dirty with no
+      // matching queue entry (old data from before that fix, or any other
+      // odd edge), before the flush below tries to send the queue.
+      await RTDB.reconcileDirtyStops();
       checkExpiredBanner();
       await refresh();
       showScreen("list");

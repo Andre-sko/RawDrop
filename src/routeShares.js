@@ -39,7 +39,8 @@
 
 const crypto = require("crypto");
 const fs = require("fs");
-const { DATA_DIR, ROUTE_SHARES_FILE } = require("./config");
+const { ROUTE_SHARES_FILE } = require("./config");
+const { saveCache } = require("./cache");
 
 // Long enough to cover a full work day, including a shift that starts
 // late and runs past midnight — see the module comment above for why
@@ -93,20 +94,18 @@ function readFromDisk() {
 
 const shares = readFromDisk();
 
-// Written via a temp file + rename so an interrupted save can never
-// leave a half-written list behind: rename is atomic on the same
-// filesystem, so readers see either the old file or the new one.
+// Debounced + atomic (temp file + rename), same mechanism src/cache.js
+// already uses for the geocode/distance caches, reused here instead of
+// this module's own immediate writeFileSync. Every driver tap of
+// "Entregue"/"Falhou" used to trigger a full synchronous rewrite of the
+// ENTIRE shares array (every active/recently-expired route for every
+// driver) — with several drivers active at once, that's real blocking
+// disk I/O on every single stop update. saveCache() coalesces bursts
+// into at most one write per SAVE_DEBOUNCE_MS, and server.js's
+// `res.on("finish", flushSaves)` still guarantees the write lands before
+// any response goes out, so no durability is traded away for this.
 function persist() {
-  const tempFile = ROUTE_SHARES_FILE + ".tmp";
-  try {
-    fs.mkdirSync(DATA_DIR, { recursive: true });
-    fs.writeFileSync(tempFile, JSON.stringify(shares, null, 2), "utf-8");
-    fs.renameSync(tempFile, ROUTE_SHARES_FILE);
-  } catch (err) {
-    // A failed write must not lose the status the driver just confirmed
-    // — it stays in memory and applies for this server's lifetime.
-    console.error("Aviso: nao foi possivel gravar data/route-shares.json:", err.message);
-  }
+  saveCache(ROUTE_SHARES_FILE, shares);
 }
 
 function isExpired(share, now = Date.now()) {
@@ -156,6 +155,12 @@ function createRouteShare({ addresses, coords, deadlines, roundTrip, geometry, o
       // routed value itself. `routedAs` keeps the resolved form around.
       address: original && original !== address ? original : address,
       routedAs: original && original !== address ? address : null,
+      // `roundTrip` only ever comes from the dedicated start/end address
+      // field (public/index.html's buildTextAddresses()), which injects
+      // that same address at both position 0 and the last position — a
+      // plain first/last delivery address never sets roundTrip, so this
+      // is an exact signal, not a heuristic.
+      isStartEnd: !!roundTrip && (i === 0 || i === addresses.length - 1),
       walkOnly: !!(restrictedFlags && restrictedFlags[i]),
       lat: c && typeof c.lat === "number" ? c.lat : null,
       lng: c && typeof c.lng === "number" ? c.lng : null,

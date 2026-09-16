@@ -14,6 +14,7 @@ const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "route-shares-test-"));
 process.env.DATA_DIR = tempDir;
 
 const { createRouteShare, getRouteShare, getShareStatus, updateStopStatus } = require("../src/routeShares");
+const { flushSaves } = require("../src/cache");
 
 after(() => {
   fs.rmSync(tempDir, { recursive: true, force: true });
@@ -48,8 +49,14 @@ describe("createRouteShare", () => {
     );
   });
 
-  test("persists to disk immediately", () => {
+  test("persists to disk once flushed", () => {
+    // persist() is debounced now (src/cache.js's saveCache, same
+    // mechanism the geocode/distance caches already use) — a burst of
+    // writes coalesces into one, with server.js's res.on("finish", ...)
+    // forcing it out before any HTTP response goes out. Tests call
+    // flushSaves() directly since there's no request/response here.
     const share = makeShare();
+    flushSaves();
     const onDisk = JSON.parse(fs.readFileSync(path.join(tempDir, "route-shares.json"), "utf-8"));
     assert.ok(onDisk.some((s) => s.token === share.token));
   });

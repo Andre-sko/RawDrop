@@ -1013,6 +1013,9 @@
   .manage-table tbody tr:last-child td{border-bottom:none;}
   .manage-table tbody tr:hover{background:rgba(127,127,127,0.06);}
   .manage-table tr.editing{background:rgba(232,163,61,0.08);}
+  .manage-table .drag-col{width:22px; text-align:center; color:var(--text-dim); cursor:grab; user-select:none;}
+  .manage-table tr[draggable="true"]:active{cursor:grabbing;}
+  .manage-table tr.drag-over{outline:2px dashed var(--blue); outline-offset:-2px;}
   .manage-table .num-col{width:42px; color:var(--amber); font-family:'IBM Plex Mono', monospace; font-size:12px;}
   .manage-table .key-cell{font-weight:500;}
   .manage-table .actions-col{width:1%; white-space:nowrap; text-align:right;}
@@ -1478,6 +1481,44 @@
     line-height:1;
   }
   .qr-modal{ position:relative; }
+
+  /* "Gerir todos" opens as an in-page popup (an iframe onto the exact
+     same /manage/<kind> page a new tab would load) instead of a new tab
+     — updates land the moment the iframe writes them (same-origin
+     localStorage/fetch calls), and closing it is one click instead of
+     alt-tabbing back. See index.html's openManageModal/closeManageModal. */
+  .manage-modal-overlay{
+    display:none;
+    position:fixed;
+    inset:0;
+    background:rgba(0,0,0,0.6);
+    z-index:1000;
+    align-items:center;
+    justify-content:center;
+    padding:24px;
+  }
+  .manage-modal-overlay.open{ display:flex; }
+  .manage-modal-panel{
+    background:var(--bg);
+    border:1px solid var(--border);
+    border-radius:14px;
+    width:100%;
+    max-width:1000px;
+    height:100%;
+    max-height:820px;
+    display:flex;
+    flex-direction:column;
+    overflow:hidden;
+  }
+  .manage-modal-frame{
+    flex:1;
+    width:100%;
+    border:none;
+  }
+  @media (max-width:700px){
+    .manage-modal-overlay{ padding:0; }
+    .manage-modal-panel{ max-width:none; max-height:none; border-radius:0; }
+  }
 
   .verify-badge{
     font-family:'IBM Plex Mono',monospace;

@@ -29,6 +29,34 @@ const { geocodeAddressBest } = require("./geocoding");
 
 const COORD_PAIR_RE = /^\s*(-?\d+(?:\.\d+)?)\s*,\s*(-?\d+(?:\.\d+)?)\s*$/;
 
+// Runs fn over items with a maximum number of concurrent calls in flight
+// — same worker-pool shape as server.js's own mapWithConcurrency (used
+// for the address-verify bulk endpoint), duplicated here rather than
+// imported: routing.js is required BY server.js, importing back would be
+// circular.
+async function mapWithConcurrency(items, limit, fn) {
+  const results = new Array(items.length);
+  let nextIndex = 0;
+
+  async function worker() {
+    while (nextIndex < items.length) {
+      const current = nextIndex++;
+      results[current] = await fn(items[current], current);
+    }
+  }
+
+  const workers = Array.from({ length: Math.min(limit, items.length) }, () => worker());
+  await Promise.all(workers);
+  return results;
+}
+
+// Google enforces real per-project rate limits (OVER_QUERY_LIMIT) —
+// unlike a self-hosted OSRM instance, firing a large burst of chunk
+// requests all at once risks tripping that instead of actually being
+// faster. This caps how many of buildDurationMatrix's grid chunks are
+// in flight to Google at once.
+const GOOGLE_MATRIX_CONCURRENCY = 6;
+
 // Turns whatever the app uses to identify a stop (a "lat,lng" string
 // from a GPS alias, or plain address text) into { lat, lng } for OSRM.
 // Returns null when an address simply can't be geocoded.
@@ -221,54 +249,63 @@ async function buildDurationMatrix(locations, mode) {
 
   const CHUNK = 10; // 10x10 = 100 elements, within Google's limits
 
+  async function fetchGridChunk(originIdxChunk, destIdxChunk) {
+    const originChunk = originIdxChunk.map((i) => locations[i]);
+    const destChunk = destIdxChunk.map((j) => locations[j]);
+
+    const url = new URL("https://maps.googleapis.com/maps/api/distancematrix/json");
+    url.searchParams.set("origins", originChunk.join("|"));
+    url.searchParams.set("destinations", destChunk.join("|"));
+    url.searchParams.set("mode", mode);
+    url.searchParams.set("units", "metric");
+    url.searchParams.set("key", API_KEY);
+
+    const response = await fetch(url.toString());
+    logApiRequest("distanceMatrix", originChunk.length * destChunk.length);
+    const data = await response.json();
+
+    if (data.status !== "OK") {
+      throw new Error(`Erro na API: ${data.status}`);
+    }
+
+    data.rows.forEach((row, ri) => {
+      const globalI = originIdxChunk[ri];
+      row.elements.forEach((el, ci) => {
+        const globalJ = destIdxChunk[ci];
+        if (el.status === "OK") {
+          durations[globalI][globalJ] = el.duration.value;
+          missing[globalI][globalJ] = false;
+          const cacheValue = {
+            distanceMeters: el.distance.value,
+            distanceText: el.distance.text,
+            durationSeconds: el.duration.value,
+            durationText: el.duration.text,
+          };
+          distanceCache[distanceCacheKey(locations[globalI], locations[globalJ], mode, "google")] = {
+            value: cacheValue,
+            cachedAt: Date.now(),
+          };
+        }
+      });
+    });
+  }
+
+  // Every (origin-chunk, destination-chunk) pair for this grid, fired
+  // with up to GOOGLE_MATRIX_CONCURRENCY in flight at once instead of
+  // one-at-a-time — a 250-stop route at CHUNK=10 could previously mean
+  // hundreds of sequential round-trips (minutes of pure network latency)
+  // for a single /api/optimize call.
   async function fetchGrid(originIdx, destIdx) {
     if (originIdx.length === 0 || destIdx.length === 0) return;
 
+    const chunkPairs = [];
     for (let oStart = 0; oStart < originIdx.length; oStart += CHUNK) {
       const originIdxChunk = originIdx.slice(oStart, oStart + CHUNK);
-      const originChunk = originIdxChunk.map((i) => locations[i]);
-
       for (let dStart = 0; dStart < destIdx.length; dStart += CHUNK) {
-        const destIdxChunk = destIdx.slice(dStart, dStart + CHUNK);
-        const destChunk = destIdxChunk.map((j) => locations[j]);
-
-        const url = new URL("https://maps.googleapis.com/maps/api/distancematrix/json");
-        url.searchParams.set("origins", originChunk.join("|"));
-        url.searchParams.set("destinations", destChunk.join("|"));
-        url.searchParams.set("mode", mode);
-        url.searchParams.set("units", "metric");
-        url.searchParams.set("key", API_KEY);
-
-        const response = await fetch(url.toString());
-        logApiRequest("distanceMatrix", originChunk.length * destChunk.length);
-        const data = await response.json();
-
-        if (data.status !== "OK") {
-          throw new Error(`Erro na API: ${data.status}`);
-        }
-
-        data.rows.forEach((row, ri) => {
-          const globalI = originIdxChunk[ri];
-          row.elements.forEach((el, ci) => {
-            const globalJ = destIdxChunk[ci];
-            if (el.status === "OK") {
-              durations[globalI][globalJ] = el.duration.value;
-              missing[globalI][globalJ] = false;
-              const cacheValue = {
-                distanceMeters: el.distance.value,
-                distanceText: el.distance.text,
-                durationSeconds: el.duration.value,
-                durationText: el.duration.text,
-              };
-              distanceCache[distanceCacheKey(locations[globalI], locations[globalJ], mode, "google")] = {
-                value: cacheValue,
-                cachedAt: Date.now(),
-              };
-            }
-          });
-        });
+        chunkPairs.push([originIdxChunk, destIdx.slice(dStart, dStart + CHUNK)]);
       }
     }
+    await mapWithConcurrency(chunkPairs, GOOGLE_MATRIX_CONCURRENCY, ([originIdxChunk, destIdxChunk]) => fetchGridChunk(originIdxChunk, destIdxChunk));
   }
 
   // Phase 1: completely new addresses.

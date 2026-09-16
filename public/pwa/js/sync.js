@@ -8,6 +8,12 @@
   const BASE_DELAY_MS = 5000;
   const MAX_DELAY_MS = 5 * 60 * 1000;
   const PERIODIC_FLUSH_MS = 20000;
+  // Only for the "reached the server but it failed anyway" branch below
+  // (a persistent 5xx) — actual network failures (the catch block) retry
+  // forever on purpose, since a long dead zone with no signal is the
+  // normal, expected case for this app, not something to give up on.
+  // ~16 minutes of backoff (5s,10s,...,300s capped) before flagging it.
+  const MAX_SERVER_ERROR_ATTEMPTS = 8;
 
   let token = null;
   let flushing = false;
@@ -29,11 +35,13 @@
     });
   }
 
-  // Called right after a local status change — writes to IndexedDB have
-  // already happened by the time this runs (see app.js's setStopStatus).
-  async function enqueueStatusChange({ stopId, status, reason, clientTimestamp }) {
-    await RTDB.enqueueSync({ stopId, status, reason: reason || null, clientTimestamp });
-    await notifyListeners();
+  // Called right after a local status change — the write to IndexedDB
+  // (status + queue entry, atomically) has already happened by the time
+  // this runs (see app.js's setStopStatus / RTDB.updateStopAndEnqueue).
+  // This just wakes the sync loop instead of waiting for its own
+  // periodic timer, and refreshes the "N por sincronizar" badge.
+  function kick() {
+    notifyListeners();
     flush();
   }
 
@@ -85,7 +93,18 @@
             await RTDB.removeFromQueue(item.id);
           } else {
             const attempts = (item.attempts || 0) + 1;
-            await RTDB.updateQueueItem(item.id, { attempts, nextAttemptAt: Date.now() + backoffDelay(attempts) });
+            if (attempts >= MAX_SERVER_ERROR_ATTEMPTS) {
+              // Reached the server repeatedly and it keeps failing (not a
+              // 404/400, handled above) — a persistent server-side bug for
+              // this item isn't going to fix itself by retrying forever.
+              // Flag it visibly (list.js shows lastSyncError) instead of
+              // spinning silently; re-marking the stop in the UI queues a
+              // fresh attempt with attempts back at 0.
+              await RTDB.updateStopLocal(item.stopId, { lastSyncError: `http_${res.status}_retries_exhausted` });
+              await RTDB.removeFromQueue(item.id);
+            } else {
+              await RTDB.updateQueueItem(item.id, { attempts, nextAttemptAt: Date.now() + backoffDelay(attempts) });
+            }
           }
         } catch (err) {
           // Network-level failure: offline, or the request never left
@@ -109,5 +128,5 @@
     });
   }
 
-  global.RTSync = { setToken, enqueueStatusChange, flush, start, onQueueChange };
+  global.RTSync = { setToken, kick, flush, start, onQueueChange };
 })(window);

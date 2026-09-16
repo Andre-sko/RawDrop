@@ -89,7 +89,7 @@ Torre de Belém, Lisboa"></textarea>
         <button class="btn-ghost" id="clearAddressesBtn" style="flex:1; font-size:12px;" data-i18n="clearAddressesBtn">🗑 Limpar</button>
         <button class="btn-ghost" id="sendToVerifyBtn" style="flex:1; font-size:12px;" data-i18n="sendToVerifyBtn">↗ Corrigir Endereços</button>
       </div>
-      <a class="btn-ghost manage-link" id="addressesManageLink" href="/manage/addresses" target="_blank" rel="noopener"><span data-i18n="manageAllBtn">Gerir todos</span> <span class="list-count" id="addressCount"></span> ↗</a>
+      <a class="btn-ghost manage-link" id="addressesManageLink" href="/manage/addresses" data-kind="addresses" target="_blank" rel="noopener"><span data-i18n="manageAllBtn">Gerir todos</span> <span class="list-count" id="addressCount"></span></a>
     </div>
 
     <div class="sidebar-section">
@@ -105,7 +105,7 @@ Torre de Belém, Lisboa"></textarea>
         <button class="btn-ghost" id="addAliasBtn">+</button>
       </div>
       <div id="aliasList" class="scroll-list recent-list"></div>
-      <a class="btn-ghost manage-link" id="aliasesManageLink" href="/manage/aliases" target="_blank" rel="noopener"><span data-i18n="manageAllBtn">Gerir todos</span> <span class="list-count" id="aliasCount"></span> ↗</a>
+      <a class="btn-ghost manage-link" id="aliasesManageLink" href="/manage/aliases" data-kind="aliases" target="_blank" rel="noopener"><span data-i18n="manageAllBtn">Gerir todos</span> <span class="list-count" id="aliasCount"></span></a>
     </div>
 
     <div class="sidebar-section">
@@ -124,7 +124,7 @@ Torre de Belém, Lisboa"></textarea>
       <input type="text" id="blockedParking" data-i18n-placeholder="blockedParkingPlaceholder" placeholder="46.1706,7.4453 ou Rua do Parque, Cidade" style="margin-bottom:10px;" />
       <div class="hint" data-i18n="blockedParkingHint" style="margin-top:-4px; margin-bottom:10px;">Se souberes onde a carrinha consegue estacionar perto deste endereço, o troço divide-se automaticamente em carro até lá + a pé até à porta. Sem isto, o troço inteiro é calculado a pé.</div>
       <div id="blockedList" class="scroll-list recent-list"></div>
-      <a class="btn-ghost manage-link" id="blockedManageLink" href="/manage/blocked" target="_blank" rel="noopener"><span data-i18n="manageAllBtn">Gerir todos</span> <span class="list-count" id="blockedCount"></span> ↗</a>
+      <a class="btn-ghost manage-link" id="blockedManageLink" href="/manage/blocked" data-kind="blocked" target="_blank" rel="noopener"><span data-i18n="manageAllBtn">Gerir todos</span> <span class="list-count" id="blockedCount"></span></a>
     </div>
 
     <div class="sidebar-section">
@@ -140,7 +140,7 @@ Torre de Belém, Lisboa"></textarea>
         <button class="btn-ghost" id="addDeliveryTimeBtn">+</button>
       </div>
       <div id="deliveryTimeList" class="scroll-list recent-list"></div>
-      <a class="btn-ghost manage-link" id="delivery-timesManageLink" href="/manage/delivery-times" target="_blank" rel="noopener"><span data-i18n="manageAllBtn">Gerir todos</span> <span class="list-count" id="deliveryTimeCount"></span> ↗</a>
+      <a class="btn-ghost manage-link" id="delivery-timesManageLink" href="/manage/delivery-times" data-kind="delivery-times" target="_blank" rel="noopener"><span data-i18n="manageAllBtn">Gerir todos</span> <span class="list-count" id="deliveryTimeCount"></span></a>
     </div>
 
     <div class="sidebar-section">
@@ -345,6 +345,12 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
   </div>
 </div>
 
+<div class="manage-modal-overlay" id="manageModalOverlay">
+  <div class="manage-modal-panel">
+    <iframe id="manageModalFrame" class="manage-modal-frame" title="Gerir"></iframe>
+  </div>
+</div>
+
 <script src="/js/translations.js"></script>
 <script src="/js/stop-dedupe.js"></script>
 <script src="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.js"></script>
@@ -397,6 +403,17 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
 
   const aliases = []; // {from, to: "lat,lng"}
   let lastRouteData = null; // data from the last calculated route, used for export
+
+  // Bumped at the start of every runCalculate() call; each call captures
+  // its own value and checks it after every await. Reordering a stop (or
+  // any other action that calls runCalculate again) used to fire a new
+  // calculation without cancelling the one already in flight — the two
+  // sequential per-leg calculations interleaved, and whichever `await
+  // getLegDistance()` resolved LAST won the DOM write for that leg's
+  // number, even if it belonged to the now-stale run. A driving distance
+  // shown as current could actually be leftover from the order before the
+  // drag. This guard makes a stale run notice and stop instead of racing.
+  let runCalculateGeneration = 0;
 
   // Manual stop reordering (drag or type a new number on a marker in the
   // "→ ROUTE" panel): a pinned address is sent to /api/optimize as a
@@ -517,54 +534,49 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
       .filter(l=>l.length>0 && !l.startsWith('#'));
   }
 
-  function refreshAliasPicker(){
-    const picker = $('aliasPicker');
-    const current = picker.value;
-    const addrs = getAddressLines();
-    $('addressCount').textContent = addrs.length > 0 ? `(${addrs.length})` : '';
-    picker.innerHTML = `<option value="">${t('aliasPickerDefault')}</option>` + addressPickerOptionsHtml(addrs);
-    // Keeping the same POSITION selected (not re-matching by text) is what
-    // actually preserves "the 3rd line", even when duplicate addresses
-    // exist elsewhere in the list.
-    if(current !== '' && Number(current) < addrs.length) picker.value = current;
+  // Shared by every "Escolher endereço da lista" picker (aliases, blocked,
+  // delivery times) — same rebuild-from-getAddressLines() logic, same
+  // "keep the same POSITION selected, not re-matched by text" rule (see
+  // addressPickerOptionsHtml's comment above), just pointed at a
+  // different <select>/target-<input> pair. Used to be one copy-pasted
+  // function per picker; the three had drifted (delivery-time's refresh
+  // function was already missing from most of the call sites below, see
+  // refreshAddressPickers()) before this collapsed them into one.
+  function createAddressPicker(pickerId, targetInputId){
+    function refresh(){
+      const picker = $(pickerId);
+      const current = picker.value;
+      const addrs = getAddressLines();
+      picker.innerHTML = `<option value="">${t('aliasPickerDefault')}</option>` + addressPickerOptionsHtml(addrs);
+      if(current !== '' && Number(current) < addrs.length) picker.value = current;
+    }
+    $(pickerId).addEventListener('focus', refresh);
+    $(pickerId).addEventListener('change', (e)=>{
+      const address = getAddressLines()[parseInt(e.target.value, 10)];
+      if(address != null) $(targetInputId).value = address;
+    });
+    return refresh;
   }
-  $('addressList').addEventListener('focus', refreshAliasPicker);
-  $('addressList').addEventListener('input', refreshAliasPicker);
-  $('addressList').addEventListener('focus', refreshBlockedPicker);
-  $('addressList').addEventListener('input', refreshBlockedPicker);
-  $('addressList').addEventListener('focus', refreshDeliveryTimePicker);
-  $('addressList').addEventListener('input', refreshDeliveryTimePicker);
-  $('aliasPicker').addEventListener('focus', refreshAliasPicker);
-  $('aliasPicker').addEventListener('change', (e)=>{
-    const address = getAddressLines()[parseInt(e.target.value, 10)];
-    if(address != null) $('aliasFrom').value = address;
-  });
 
-  function refreshBlockedPicker(){
-    const picker = $('blockedPicker');
-    const current = picker.value;
-    const addrs = getAddressLines();
-    picker.innerHTML = `<option value="">${t('aliasPickerDefault')}</option>` + addressPickerOptionsHtml(addrs);
-    if(current !== '' && Number(current) < addrs.length) picker.value = current;
-  }
-  $('blockedPicker').addEventListener('focus', refreshBlockedPicker);
-  $('blockedPicker').addEventListener('change', (e)=>{
-    const address = getAddressLines()[parseInt(e.target.value, 10)];
-    if(address != null) $('blockedAddress').value = address;
-  });
+  const refreshAliasPicker = createAddressPicker('aliasPicker', 'aliasFrom');
+  const refreshBlockedPicker = createAddressPicker('blockedPicker', 'blockedAddress');
+  const refreshDeliveryTimePicker = createAddressPicker('deliveryTimePicker', 'deliveryTimeAddress');
 
-  function refreshDeliveryTimePicker(){
-    const picker = $('deliveryTimePicker');
-    const current = picker.value;
-    const addrs = getAddressLines();
-    picker.innerHTML = `<option value="">${t('aliasPickerDefault')}</option>` + addressPickerOptionsHtml(addrs);
-    if(current !== '' && Number(current) < addrs.length) picker.value = current;
+  // Every one of the three needs refreshing whenever the address list
+  // itself changes — calling them individually at each call site is
+  // exactly how delivery-time's picker ended up missing from several of
+  // them (it stayed stale, e.g. still showing addresses "Limpar" had just
+  // cleared, until the driver happened to focus the textarea again). One
+  // call, always all three, plus the "(N)" count next to "Gerir todos".
+  function refreshAddressPickers(){
+    const count = getAddressLines().length;
+    $('addressCount').textContent = count > 0 ? `(${count})` : '';
+    refreshAliasPicker();
+    refreshBlockedPicker();
+    refreshDeliveryTimePicker();
   }
-  $('deliveryTimePicker').addEventListener('focus', refreshDeliveryTimePicker);
-  $('deliveryTimePicker').addEventListener('change', (e)=>{
-    const address = getAddressLines()[parseInt(e.target.value, 10)];
-    if(address != null) $('deliveryTimeAddress').value = address;
-  });
+  $('addressList').addEventListener('focus', refreshAddressPickers);
+  $('addressList').addEventListener('input', refreshAddressPickers);
 
   $('addAliasBtn').addEventListener('click', async ()=>{
     const from = $('aliasFrom').value.trim();
@@ -800,8 +812,7 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
 
   $('clearAddressesBtn').addEventListener('click', ()=>{
     $('addressList').value = '';
-    refreshAliasPicker();
-    refreshBlockedPicker();
+    refreshAddressPickers();
     $('fileInput').value = '';
     clearStatus();
     $('manifestArea').innerHTML = `<div class="empty-state" data-i18n="emptyState">${t('emptyState')}</div>`;
@@ -1297,6 +1308,7 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
   }
 
   async function runCalculate(optimized = false, preserveView = false){
+    const myGen = ++runCalculateGeneration; // see the declaration's comment
     clearStatus();
     const { addresses: rawAddresses, deadlines, roundTrip } = buildTextAddresses();
     const startTime = $('startTime').value;
@@ -1360,6 +1372,7 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
 
       for(const part of parts){
         const r = await getLegDistance(part.origin, part.dest, part.mode);
+        if(myGen !== runCalculateGeneration) return; // a newer calculation started meanwhile — abandon this stale one rather than race it into the DOM
         partResults.push({ ...r, mode: part.mode });
         if(r.error){
           legError = r.error;
@@ -1415,6 +1428,7 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
     // one, otherwise the address text — the server resolves either
     // through the geocode cache the legs above just filled).
     await fetchFuelEstimate(labels[0].coord || labels[0].address);
+    if(myGen !== runCalculateGeneration) return; // a newer calculation started meanwhile — abandon this stale one
     const fuelCost = (fuelEstimate && fuelEstimate.consumption > 0 && fuelEstimate.price > 0)
       ? (drivingMeters/1000) * (fuelEstimate.consumption/100) * fuelEstimate.price
       : null;
@@ -1505,8 +1519,7 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
       entry.deadlineMinutes != null ? `${entry.address} | ${formatDeadlineHHMM(entry.deadlineMinutes)}` : entry.address
     );
     $('addressList').value = reorderedLines.join('\n');
-    refreshAliasPicker();
-    refreshBlockedPicker();
+    refreshAddressPickers();
     showStatus(t('optimizeReorderedInfo'), 'info');
     // preserveView: the driver was just looking at this exact spot on the
     // map to confirm the block — snapping the view back to fit the whole
@@ -1963,8 +1976,7 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
     $('addressList').value = preManualEditSnapshot.addressListValue;
     pinnedAddresses = preManualEditSnapshot.pinnedAddresses;
     preManualEditSnapshot = null;
-    refreshAliasPicker();
-    refreshBlockedPicker();
+    refreshAddressPickers();
     runCalculate(true, true);
   }
 
@@ -1979,8 +1991,7 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
       entry.deadlineMinutes != null ? `${entry.address} | ${formatDeadlineHHMM(entry.deadlineMinutes)}` : entry.address
     );
     $('addressList').value = lines.join('\n');
-    refreshAliasPicker();
-    refreshBlockedPicker();
+    refreshAddressPickers();
     runCalculate(true, true); // re-render + redraw the map, keep the current view
   }
 
@@ -2223,14 +2234,19 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
           entry.deadlineMinutes != null ? `${entry.address} | ${formatDeadlineHHMM(entry.deadlineMinutes)}` : entry.address
         );
         $('addressList').value = reorderedLines.join('\n');
-        refreshAliasPicker();
-        refreshBlockedPicker();
+        refreshAddressPickers();
 
         // Say what the reorder bought, in minutes of driving, straight
         // from the matrix the optimizer used. "Reordenada" on its own
         // left no way to tell a good reorder from a pointless one.
         const savedMin = typeof data.savedSeconds === 'number' ? Math.round(data.savedSeconds / 60) : null;
-        if(data.lateStops && data.lateStops.length > 0){
+        // unreachableIndices means givenSeconds/optimizedSeconds/savedSeconds
+        // came back null (no real number exists for a route that includes a
+        // stop with no way in or out) — that's worse than merely running
+        // late, so it takes priority over the lateness warning below.
+        if(data.unreachableIndices && data.unreachableIndices.length > 0){
+          showStatus(t('optimizeUnreachableWarning', {count: data.unreachableIndices.length}), 'error');
+        } else if(data.lateStops && data.lateStops.length > 0){
           showStatus(t('optimizeLateWarning', {count: data.lateStops.length}), 'error');
         } else if(savedMin != null && savedMin > 0){
           showStatus(t('optimizeSavedInfo', {minutes: savedMin}), 'ok');
@@ -2367,8 +2383,7 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
     const current = textarea.value.split(/\r?\n/).map(l=>l.trim()).filter(Boolean);
     current.push(address);
     textarea.value = current.join('\n');
-    refreshAliasPicker();
-    refreshBlockedPicker();
+    refreshAddressPickers();
     if(btnEl){
       const original = btnEl.textContent;
       btnEl.textContent = t('videoAddedToRoute');
@@ -2958,8 +2973,7 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
     $('verifyApplyToRouteBtn').addEventListener('click', ()=>{
       const finalList = buildFinalList();
       $('addressList').value = finalList.join('\n');
-      refreshAliasPicker();
-      refreshBlockedPicker();
+      refreshAddressPickers();
       showVerifyStatus(t('verifyAppliedToRoute'), 'ok');
       // The corrected list now lives on the Route tab, so that is where
       // the driver has to be looking. Staying here reads as a button
@@ -3095,9 +3109,7 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
     currentLang = e.target.value;
     try{ localStorage.setItem(LANG_STORAGE_KEY, currentLang); } catch(err){ /* ignora */ }
     applyStaticTranslations();
-    refreshAliasPicker();
-    refreshBlockedPicker();
-    refreshDeliveryTimePicker();
+    refreshAddressPickers();
     renderAliases();
     renderBlocked();
     renderDeliveryTimes();
@@ -3143,7 +3155,7 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
       lastSyncedAddressList = saved;
       if(saved !== $('addressList').value){
         $('addressList').value = saved;
-        refreshAliasPicker(); refreshBlockedPicker(); refreshDeliveryTimePicker();
+        refreshAddressPickers();
       }
     } catch(err){ /* ignora */ }
   }
@@ -3236,13 +3248,45 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
   renderDeliveryTimes();
   refreshCacheStats();
 
-  // The "Gerir todos" pages edit the same server-side lists in another
-  // tab; coming back here should show that work, not a stale copy.
-  window.addEventListener('focus', async ()=>{
+  // The "Gerir todos" popup (and, via a modifier-click, a real new tab —
+  // see wireManageModal below) edits the same server-side lists; coming
+  // back here should show that work, not a stale copy.
+  async function refreshManagedLists(){
     await fetchAliases(); renderAliases(); refreshAliasPicker();
     await fetchBlocked(); renderBlocked(); refreshBlockedPicker();
     await fetchDeliveryTimes(); renderDeliveryTimes(); refreshDeliveryTimePicker();
+  }
+  window.addEventListener('focus', refreshManagedLists);
+
+  // "Gerir todos" as an in-page popup: same /manage/<kind> page, loaded
+  // in an iframe instead of a new tab, so closing it is one click and
+  // the lists refresh immediately (no alt-tabbing, no waiting on the
+  // 'focus' listener above, which never fires for an iframe in the same
+  // tab). Ctrl/Cmd/Shift/middle-click still opens the classic new tab —
+  // the <a href> and target="_blank" are left in place for that, only a
+  // plain left-click is intercepted.
+  function openManageModal(kind){
+    $('manageModalFrame').src = '/manage/' + kind;
+    $('manageModalOverlay').classList.add('open');
+  }
+  function closeManageModal(){
+    $('manageModalOverlay').classList.remove('open');
+    $('manageModalFrame').src = 'about:blank'; // stop it running once hidden
+    refreshManagedLists();
+    restoreAddressListLocally();
+  }
+  document.querySelectorAll('.manage-link[data-kind]').forEach((a) => {
+    a.addEventListener('click', (e) => {
+      if (e.ctrlKey || e.metaKey || e.shiftKey || e.button === 1) return;
+      e.preventDefault();
+      openManageModal(a.getAttribute('data-kind'));
+    });
   });
+  $('manageModalOverlay').addEventListener('click', (e) => { if (e.target === $('manageModalOverlay')) closeManageModal(); });
+  // The embedded page's own iframe can ask to be closed (its "← Voltar"
+  // link would otherwise navigate the iframe itself to "/", stranding
+  // the driver inside a tiny embedded home page) — see manage.js.
+  window.addEventListener('message', (e) => { if (e.source === $('manageModalFrame').contentWindow && e.data === 'close-manage-modal') closeManageModal(); });
   updateFileDropText();
   if(window.RouteMapUI) window.RouteMapUI.init({
     t, escapeHtml,

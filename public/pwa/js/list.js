@@ -16,6 +16,7 @@
   let callbacks = {};
   let pendingFailId = null; // stop id currently going through the reason picker
   let toastTimer = null;
+  let activeTab = "pending"; // "pending" | "done" — which list the counters currently show
 
   function escapeHtml(s) {
     return String(s == null ? "" : s).replace(/[&<>"']/g, (c) => ({
@@ -39,6 +40,11 @@
   function cardHtml(stop, done) {
     const deadline = stop.deadline ? `<span class="deadline-badge">🎯 ${escapeHtml(stop.deadline)}</span>` : "";
     const walk = stop.walkOnly ? `<span class="walk-badge" title="${escapeHtml(t("walkOnlyTitle"))}">🚶 ${escapeHtml(t("walkOnly"))}</span>` : "";
+    // Set when sync.js gave up retrying (a permanent 404/400, or a
+    // persistent server error after MAX_SERVER_ERROR_ATTEMPTS) — the mark
+    // itself is safe on the phone, but the office never got it. Tapping
+    // the card and re-confirming the same status queues a fresh attempt.
+    const syncFailed = stop.lastSyncError ? `<span class="sync-fail-badge" title="${escapeHtml(t("syncFailedTitle"))}">⚠ ${escapeHtml(t("syncFailedBadge"))}</span>` : "";
     const routedAs = stop.routedAs ? `<div class="stop-routed-as">📌 ${escapeHtml(stop.routedAs)}</div>` : "";
     const actions = done
       ? `<div class="stop-actions"><button class="btn-undo" data-action="undo" title="${escapeHtml(t("undoTitle"))}">${escapeHtml(t("undo"))}</button></div>`
@@ -59,6 +65,7 @@
             <a class="icon-btn" data-action="maps" href="${mapsUrl(stop)}" target="_blank" rel="noopener" title="${escapeHtml(t("mapsTitle"))}">📍</a>
             ${deadline}
             ${walk}
+            ${syncFailed}
           </div>
           ${statusRow}
         </div>
@@ -66,18 +73,35 @@
       </article>`;
   }
 
+  // Tabbed view: only one of listPending/listDone is visible at a time,
+  // switched by tapping the "Por entregar" / "Concluídas" counters — the
+  // done list used to sit permanently stacked below the pending one,
+  // which meant scrolling past every delivered stop to see what's left.
+  function applyTabVisibility() {
+    els.listPending.hidden = activeTab !== "pending";
+    els.listDone.hidden = activeTab !== "done";
+    els.counterPending.classList.toggle("active", activeTab === "pending");
+    els.counterDone.classList.toggle("active", activeTab === "done");
+  }
+
   function render(stops) {
-    const pending = stops.filter((s) => s.status === "pending");
-    const done = stops.filter((s) => s.status !== "pending");
+    // The roundTrip start/end address (routeShares.js's isStartEnd) isn't
+    // a real delivery — opt-out via Settings ("Ignorar ponto de
+    // partida/chegada") so it stops padding the counters and stop list.
+    const relevant = RTSettings.get("excludeStartEnd") ? stops.filter((s) => !s.isStartEnd) : stops;
+    const pending = relevant.filter((s) => s.status === "pending");
+    const done = relevant.filter((s) => s.status !== "pending");
 
     els.countPending.textContent = pending.length;
     els.countDone.textContent = done.length;
-    els.doneHeader.textContent = t("doneHeader", { n: done.length });
-    els.doneHeader.hidden = done.length === 0;
+    els.doneHeader.hidden = true; // redundant now — the counter above is the tab label
 
     els.listPending.innerHTML = pending.map((s) => cardHtml(s, false)).join("") ||
       `<p class="empty-hint">${escapeHtml(t("noPending"))}</p>`;
-    els.listDone.innerHTML = done.map((s) => cardHtml(s, true)).join("");
+    els.listDone.innerHTML = done.map((s) => cardHtml(s, true)).join("") ||
+      `<p class="empty-hint">${escapeHtml(t("noDone"))}</p>`;
+
+    applyTabVisibility();
   }
 
   function showToast(message) {
@@ -146,6 +170,15 @@
   }
 
   function wireEvents(root) {
+    els.counterPending.addEventListener("click", () => {
+      activeTab = "pending";
+      applyTabVisibility();
+    });
+    els.counterDone.addEventListener("click", () => {
+      activeTab = "done";
+      applyTabVisibility();
+    });
+
     root.addEventListener("click", (ev) => {
       const actionEl = ev.target.closest("[data-action]");
       const card = findStopEl(ev.target);

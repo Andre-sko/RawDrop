@@ -116,6 +116,17 @@
     return String(s || '').toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[\s'’]/g, '');
   }
 
+  // Opened as a same-origin iframe inside index.html's "Gerir todos"
+  // popup (see openManageModal there) as often as it's a real standalone
+  // tab (a modifier-click, or this URL typed/bookmarked directly) — the
+  // "← Voltar" link only makes sense as "close the popup" in the first
+  // case; navigating the IFRAME itself to "/" would strand the user
+  // inside a tiny embedded home page instead.
+  if (window.parent !== window) {
+    const back = document.querySelector('.manage-back');
+    if (back) back.addEventListener('click', (e) => { e.preventDefault(); window.parent.postMessage('close-manage-modal', '*'); });
+  }
+
   document.title = t(kind.title) + ' — ' + t('appTitle');
   $('manageEyebrow').textContent = t(kind.title);
   $('manageDescription').textContent = t(kind.description);
@@ -166,7 +177,7 @@
   // ---- rendering
   function renderHead() {
     $('manageHead').innerHTML =
-      '<th class="num-col">#</th>' +
+      '<th class="drag-col"></th><th class="num-col">#</th>' +
       kind.columns.map((c) => `<th>${escapeHtml(t(c.label))}</th>`).join('') +
       `<th class="actions-col">${escapeHtml(t('manageColActions'))}</th>`;
   }
@@ -191,8 +202,12 @@
       : `<button class="btn-ghost act-edit" title="${escapeHtml(t('manageEditBtn'))}">✏️</button>
          <button class="btn-ghost act-copy" title="${escapeHtml(t('manageCopyBtn'))}">⧉</button>
          <button class="btn-ghost act-delete" title="${escapeHtml(t('manageDeleteBtn'))}">🗑</button>`;
-    return `<tr data-key="${escapeHtml(row[kind.key] == null ? '' : row[kind.key])}" class="${editing ? 'editing' : ''}">
-      <td class="num-col">${i}</td>${cells}<td class="actions-col">${actions}</td></tr>`;
+    // Dragging only makes sense against the real (unfiltered) order, and
+    // never on a row mid-edit (its own inputs need normal text-drag/select).
+    const draggable = !editing && !filterText;
+    const dragCol = draggable ? `<td class="drag-col" title="${escapeHtml(t('manageDragTitle'))}">⠿</td>` : '<td class="drag-col"></td>';
+    return `<tr data-key="${escapeHtml(row[kind.key] == null ? '' : row[kind.key])}" class="${editing ? 'editing' : ''}"${draggable ? ' draggable="true"' : ''}>
+      ${dragCol}<td class="num-col">${i}</td>${cells}<td class="actions-col">${actions}</td></tr>`;
   }
 
   function render() {
@@ -222,6 +237,23 @@
   }
 
   // ---- actions
+  // The server only knows "add-or-replace by key" (POST) and "delete by
+  // key" (DELETE) — a rename that changes the key is these two calls,
+  // not one atomic operation. The new entry from save() below already
+  // landed by the time this runs; a couple of quick retries absorbs a
+  // transient blip between the two requests, so the old key doesn't get
+  // left behind as an orphaned duplicate over a one-off network hiccup.
+  async function removeWithRetry(keyValue, attempts = 3, delayMs = 400) {
+    let lastErr = null;
+    for (let i = 0; i < attempts; i++) {
+      try { return await remove(keyValue); }
+      catch (err) { lastErr = err; if (i < attempts - 1) await new Promise((r) => setTimeout(r, delayMs)); }
+    }
+    const wrapped = new Error(lastErr.message);
+    wrapped.staleOldKey = keyValue;
+    throw wrapped;
+  }
+
   async function commitEdit(tr) {
     const isNew = tr.hasAttribute('data-new');
     const oldKey = isNew ? null : tr.getAttribute('data-key');
@@ -234,13 +266,26 @@
       } else {
         rows = await save(kind.toBody(edited));
         if (oldKey !== null && normalizeForMatch(oldKey) !== normalizeForMatch(edited[kind.key])) {
-          rows = await remove(oldKey);
+          rows = await removeWithRetry(oldKey);
         }
       }
       editingKey = null; addingNew = false;
       render();
       showStatus(t('manageSaved'), 'ok');
     } catch (err) {
+      if (err.staleOldKey) {
+        // The edit itself DID save (a new/updated row exists) — only the
+        // old key's cleanup failed, so this gets its own message instead
+        // of the generic "could not save", which would wrongly suggest
+        // the edit was lost.
+        // `rows` is already the server's post-save() response, so it
+        // correctly shows BOTH the new entry and the not-yet-deleted old
+        // one — nothing further to reconcile here, just render it as-is.
+        editingKey = null; addingNew = false;
+        render();
+        showStatus(t('manageRenameLeftoverWarning', { old: err.staleOldKey, msg: err.message }), 'error');
+        return;
+      }
       showStatus(t('manageSaveError', { msg: err.message }), 'error');
     }
   }
@@ -267,6 +312,76 @@
       setTimeout(() => { btn.textContent = original; }, 1200);
     } catch (err) { showStatus(t('manageCopyError'), 'error'); }
   }
+
+  // ---- drag-and-drop reorder (native HTML5 dnd, same pattern as the
+  // main page's manifest markers — no library needed for one draggable
+  // list). Order only means something for 'addresses' (the visit order)
+  // but every manager gets it, so lists the user groups manually (e.g.
+  // by neighbourhood) stay in the order they were arranged, not
+  // whatever order the server happened to store them in.
+  function reorderedRows(fromKey, toKey) {
+    if (fromKey === toKey) return null;
+    const fromIdx = rows.findIndex((r) => r[kind.key] === fromKey);
+    const toIdx = rows.findIndex((r) => r[kind.key] === toKey);
+    if (fromIdx === -1 || toIdx === -1) return null;
+    const next = rows.slice();
+    const [moved] = next.splice(fromIdx, 1);
+    next.splice(toIdx, 0, moved);
+    return next;
+  }
+
+  async function commitReorder(fromKey, toKey) {
+    const next = reorderedRows(fromKey, toKey);
+    if (!next) return;
+    if (kind.local) {
+      rows = writeLocalAddresses(next.map((r) => ({ address: r.address, deadline: r.deadline })));
+      render();
+      return;
+    }
+    try {
+      const res = await fetch(kind.api + '/reorder', {
+        method: 'PUT', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ keys: next.map((r) => r[kind.key]) }),
+      });
+      const data = await res.json().catch(() => null);
+      if (!res.ok) throw new Error((data && data.error) || res.statusText);
+      rows = data;
+      render();
+    } catch (err) {
+      showStatus(t('manageReorderError', { msg: err.message }), 'error');
+    }
+  }
+
+  let draggedKey = null;
+  $('manageBody').addEventListener('dragstart', (e) => {
+    const tr = e.target.closest('tr[draggable="true"]');
+    if (!tr) { e.preventDefault(); return; }
+    draggedKey = tr.getAttribute('data-key');
+    e.dataTransfer.effectAllowed = 'move';
+  });
+  $('manageBody').addEventListener('dragover', (e) => {
+    const tr = e.target.closest('tr[data-key]');
+    if (!tr || draggedKey === null) return;
+    e.preventDefault();
+    tr.classList.add('drag-over');
+  });
+  $('manageBody').addEventListener('dragleave', (e) => {
+    const tr = e.target.closest('tr');
+    if (tr) tr.classList.remove('drag-over');
+  });
+  $('manageBody').addEventListener('drop', (e) => {
+    const tr = e.target.closest('tr[data-key]');
+    document.querySelectorAll('#manageBody tr.drag-over').forEach((el) => el.classList.remove('drag-over'));
+    if (!tr || draggedKey === null) return;
+    e.preventDefault();
+    const toKey = tr.getAttribute('data-key');
+    commitReorder(draggedKey, toKey);
+    draggedKey = null;
+  });
+  $('manageBody').addEventListener('dragend', () => {
+    document.querySelectorAll('#manageBody tr.drag-over').forEach((el) => el.classList.remove('drag-over'));
+    draggedKey = null;
+  });
 
   $('manageBody').addEventListener('click', (e) => {
     const btn = e.target.closest('button');

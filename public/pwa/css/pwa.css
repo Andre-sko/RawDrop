@@ -118,10 +118,17 @@ button, input {
 .counter {
   flex: 1;
   background: var(--panel-2);
+  border: 1px solid transparent;
   border-radius: 12px;
   padding: 10px 12px;
   text-align: center;
+  font: inherit;
+  cursor: pointer;
+  opacity: 0.6;
 }
+.counter.active { opacity: 1; }
+.counter-pending.active { border-color: var(--accent); }
+.counter-done.active { border-color: var(--ok); }
 .counter .num { display: block; font-size: 26px; font-weight: 800; line-height: 1.1; }
 .counter .lbl { display: block; font-size: 12px; color: var(--muted); margin-top: 2px; }
 .counter-pending .num { color: var(--accent); }
@@ -155,7 +162,7 @@ button, input {
   overflow-y: auto;
 }
 #listScreen { overflow: hidden; }
-#listScreen > .stop-section:first-of-type { flex: 1; min-height: 0; }
+#listScreen > .stop-section:not([hidden]) { flex: 1; min-height: 0; }
 .stop-section-header {
   padding: 10px 16px 4px;
   font-size: 13px;
@@ -320,6 +327,20 @@ button, input {
   font-size: 20px;
   cursor: pointer;
 }
+.map-style-btn {
+  position: absolute;
+  right: 12px;
+  bottom: calc(16px + 52px + 10px + env(safe-area-inset-bottom));
+  z-index: 5;
+  width: 52px; height: 52px;
+  border-radius: 50%;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  font-size: 20px;
+  cursor: pointer;
+}
+.map-style-btn.active { background: var(--accent); color: #171208; }
 .map-pin {
   width: 32px; height: 32px;
   border-radius: 50% 50% 50% 0;
@@ -449,6 +470,11 @@ button, input {
   font-size: 12px; padding: 3px 8px; border-radius: 999px;
   background: rgba(91,143,214,0.18); color: #8FB4E8;
 }
+.sync-fail-badge {
+  display: inline-flex; align-items: center; gap: 3px;
+  font-size: 12px; padding: 3px 8px; border-radius: 999px;
+  background: rgba(226,102,91,0.18); color: var(--fail);
+}
 .stop-routed-as { font-size: 12px; color: var(--muted); margin-top: 2px; font-family: ui-monospace, monospace; }
 
 /* ---------- Settings modal ---------- */
@@ -471,6 +497,19 @@ button, input {
 }
 .setting-toggle input[type="checkbox"]:checked { background: var(--ok); }
 .setting-toggle input[type="checkbox"]:checked::after { left: 23px; }
+.setting-action-btn {
+  flex: 0 0 auto;
+  min-height: 44px;
+  padding: 0 16px;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--panel-2);
+  color: var(--text);
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+}
+.setting-action-btn.granted { background: var(--ok); border-color: var(--ok); color: #06210F; }
 
 /* ---------- Rugged-phone tuning (Galaxy XCover 7 class: 412x892 CSS px,
    gloves, sunlight, sometimes mounted sideways in the van) ---------- */
@@ -513,5 +552,6 @@ input, select, button { font-size: max(16px, 1em); }
   #listScreen .stop-section > .empty-hint { flex: 1 1 100%; }
   .next-stop-bar { right: auto; max-width: 480px; }
   .map-locate-btn { bottom: 12px; }
+  .map-style-btn { bottom: calc(12px + 52px + 10px); }
   .maplibregl-ctrl-bottom-right { right: 74px; }
 }

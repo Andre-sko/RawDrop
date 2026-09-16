@@ -6,6 +6,7 @@
   const KEY = "route-tracker-pwa-settings";
   const DEFAULTS = {
     autoArrive: false, // GPS arrival opens the stop's modal by itself — opt-in
+    excludeStartEnd: true, // the depot address (roundTrip's start/end) isn't a real delivery — opt-out
   };
   let cache = null;
   function load() {

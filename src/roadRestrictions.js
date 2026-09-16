@@ -19,6 +19,7 @@
 //     startsAt: string (ISO) | null,    // null = in force immediately
 //     expiresAt: string (ISO) | null,   // null = never expires
 //     active: boolean,
+//     deactivatedAt: string (ISO) | null, // when `active` was set false
 //   }
 
 const crypto = require("crypto");
@@ -80,10 +81,38 @@ function createRestriction({ type, geometry, excludePolygon, reason, startsAt, e
     startsAt: startsAt || null,
     expiresAt: expiresAt || null,
     active: true,
+    deactivatedAt: null,
   };
   restrictions.push(entry);
   persist();
   return entry;
+}
+
+// Unlike route-shares.json (which has its own TTL-driven prune), nothing
+// here used to remove an entry, ever — every block created, temporary or
+// permanent, stayed in the array and got rewritten to disk on every
+// persist() call forever, even long after it expired or was manually
+// removed. 30 days is long enough to still answer "what did we block
+// last month", short enough not to grow without bound on a long-lived
+// deployment.
+const RETENTION_MS = 30 * 24 * 60 * 60 * 1000;
+
+function isPastRetention(r, now = Date.now()) {
+  if (!r.active && r.deactivatedAt) return now - new Date(r.deactivatedAt).getTime() > RETENTION_MS;
+  if (r.expiresAt) return now - new Date(r.expiresAt).getTime() > RETENTION_MS;
+  return false; // still active with no expiry (a "for ever" block still in force) — never pruned
+}
+
+// Lazy sweep, same philosophy as src/routeShares.js's pruneExpired():
+// nothing runs on a timer, an entry past its retention window is simply
+// dropped the next time anything here reads the list.
+function pruneOld() {
+  const now = Date.now();
+  const before = restrictions.length;
+  for (let i = restrictions.length - 1; i >= 0; i--) {
+    if (isPastRetention(restrictions[i], now)) restrictions.splice(i, 1);
+  }
+  if (restrictions.length !== before) persist();
 }
 
 // Lazy windowing, same philosophy as src/cache.js: nothing is
@@ -91,6 +120,7 @@ function createRestriction({ type, geometry, excludePolygon, reason, startsAt, e
 // here — so a block scheduled for next Tuesday sits in the file doing
 // nothing until Tuesday, then starts applying on its own.
 function listActiveRestrictions() {
+  pruneOld();
   const now = Date.now();
   return restrictions.filter(
     (r) =>
@@ -101,6 +131,7 @@ function listActiveRestrictions() {
 }
 
 function listAllRestrictions() {
+  pruneOld();
   return restrictions;
 }
 
@@ -108,6 +139,7 @@ function deactivateRestriction(id) {
   const entry = restrictions.find((r) => r.id === id);
   if (!entry) return null;
   entry.active = false;
+  entry.deactivatedAt = new Date().toISOString();
   persist();
   return entry;
 }

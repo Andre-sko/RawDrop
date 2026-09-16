@@ -68,7 +68,8 @@ function isApiRequest(url) {
 // which covers both the style JSON and every tile it references without
 // needing to know the exact URL shape either uses.
 function isTileRequest(url) {
-  return url.hostname.endsWith("openfreemap.org") || url.hostname.endsWith("maptiler.com");
+  return url.hostname.endsWith("openfreemap.org") || url.hostname.endsWith("maptiler.com")
+    || url.hostname.endsWith("arcgisonline.com"); // satellite tiles (map.js) — default style, must work offline too
 }
 
 async function cacheFirst(request, cacheName) {

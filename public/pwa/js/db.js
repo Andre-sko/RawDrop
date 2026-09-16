@@ -79,6 +79,54 @@
     return updated;
   }
 
+  // Marks a stop dirty AND queues it for sync in ONE IndexedDB transaction
+  // — a single `readwrite` transaction across both stores commits or fails
+  // as a unit, so a process kill between "wrote the status" and "queued
+  // it" (very real: the app backgrounded for hours on a delivery shift)
+  // can no longer leave a stop marked delivered locally with nothing ever
+  // queued to tell the server. Replaces the old two-call, two-transaction
+  // updateStopLocal()+enqueueSync() pair for this one call site.
+  async function updateStopAndEnqueue(stopId, stopPatch, queueItem) {
+    const db = await openDb();
+    return new Promise((resolve, reject) => {
+      const t = db.transaction(["stops", "queue"], "readwrite");
+      const stopsStore = t.objectStore("stops");
+      const queueStore = t.objectStore("queue");
+      let updatedStop = null;
+
+      const getReq = stopsStore.get(stopId);
+      getReq.onsuccess = () => {
+        const current = getReq.result;
+        if (!current) return; // no such stop — transaction just completes with nothing written
+        updatedStop = { ...current, ...stopPatch };
+        stopsStore.put(updatedStop);
+
+        // Drop any earlier, not-yet-sent queue entry for this same stop
+        // before adding the new one — without this, deliver→undo→deliver
+        // sends three requests instead of one (correctness was only ever
+        // saved by the server's own timestamp ordering, not by this
+        // client), and the "N por sincronizar" badge overcounts distinct
+        // stops as distinct pending syncs. No index on stopId, but the
+        // queue is normally a handful of items, so a cursor scan is cheap.
+        const cursorReq = queueStore.openCursor();
+        cursorReq.onsuccess = () => {
+          const cursor = cursorReq.result;
+          if (cursor) {
+            if (cursor.value.stopId === stopId) cursor.delete();
+            cursor.continue();
+          } else {
+            queueStore.add({ attempts: 0, nextAttemptAt: 0, createdAt: new Date().toISOString(), ...queueItem });
+          }
+        };
+        cursorReq.onerror = () => reject(cursorReq.error);
+      };
+      getReq.onerror = () => reject(getReq.error);
+
+      t.oncomplete = () => resolve(updatedStop);
+      t.onerror = () => reject(t.error);
+    });
+  }
+
   // --- sync queue -------------------------------------------------------
 
   async function enqueueSync(item) {
@@ -109,6 +157,23 @@
     return reqToPromise(store.count());
   }
 
+  // Defense-in-depth for the same gap updateStopAndEnqueue() closes going
+  // forward: a stop marked `dirty` with no queue entry pointing at it (old
+  // data from before this fix, or any other odd edge) would otherwise sit
+  // "delivered" on the phone forever with nothing ever telling the server.
+  // Called once at boot (see app.js) — re-enqueues each one from the
+  // stop's own last-known status, so it rejoins the normal sync/backoff
+  // flow instead of needing a manual re-tap from the driver.
+  async function reconcileDirtyStops() {
+    const [stops, queue] = await Promise.all([getStops(), getQueue()]);
+    const queuedStopIds = new Set(queue.map((q) => q.stopId));
+    const orphaned = stops.filter((s) => s.dirty && !queuedStopIds.has(s.id));
+    for (const s of orphaned) {
+      await enqueueSync({ stopId: s.id, status: s.status, reason: s.statusReason || null, clientTimestamp: s.clientTimestamp || new Date().toISOString() });
+    }
+    return orphaned.length;
+  }
+
   // Wipes everything — used only when the driver explicitly scans a
   // different route, replacing whatever day/route was loaded before.
   async function clearAll() {
@@ -126,8 +191,8 @@
 
   global.RTDB = {
     saveRoute, getRoute,
-    saveStops, getStops, getStop, updateStopLocal,
-    enqueueSync, getQueue, updateQueueItem, removeFromQueue, countQueue,
+    saveStops, getStops, getStop, updateStopLocal, updateStopAndEnqueue,
+    enqueueSync, getQueue, updateQueueItem, removeFromQueue, countQueue, reconcileDirtyStops,
     clearAll,
   };
 })(window);

@@ -40,8 +40,8 @@
     <header class="list-header">
       <div class="header-row">
         <div class="counters">
-          <div class="counter counter-pending"><span class="num" id="countPending">0</span><span class="lbl" data-i18n="pending">Por entregar</span></div>
-          <div class="counter counter-done"><span class="num" id="countDone">0</span><span class="lbl" data-i18n="done">Concluídas</span></div>
+          <button class="counter counter-pending active" id="counterPending" type="button"><span class="num" id="countPending">0</span><span class="lbl" data-i18n="pending">Por entregar</span></button>
+          <button class="counter counter-done" id="counterDone" type="button"><span class="num" id="countDone">0</span><span class="lbl" data-i18n="done">Concluídas</span></button>
         </div>
         <button class="icon-btn-header" id="settingsBtn" data-i18n-title="settingsTitle" title="Definições">⚙️</button>
         <button class="icon-btn-header" id="rescanBtn" data-i18n-title="rescanTitle" title="Carregar nova rota">📷</button>
@@ -58,6 +58,7 @@
   <section id="mapScreen" class="screen" hidden>
     <div id="mapContainer"></div>
     <div id="nextStopBar" class="next-stop-bar" hidden></div>
+    <button id="satelliteBtn" class="map-style-btn" data-i18n-title="satelliteTitle" title="Vista de satélite">🛰️</button>
     <button id="locateBtn" class="map-locate-btn" data-i18n-title="locateTitle" title="Centrar na minha localização">🎯</button>
   </section>
 
@@ -117,6 +118,27 @@
         </span>
         <input type="checkbox" id="autoArriveToggle" />
       </label>
+      <label class="setting-row setting-toggle">
+        <span>
+          <span class="setting-label" data-i18n="settingExcludeStartEnd">Ignorar ponto de partida/chegada</span>
+          <span class="setting-hint" data-i18n="settingExcludeStartEndHint">Não conta como entrega nas contagens nem na lista — é só o local onde a rota começa/acaba.</span>
+        </span>
+        <input type="checkbox" id="excludeStartEndToggle" />
+      </label>
+      <div class="setting-row">
+        <span>
+          <span class="setting-label" data-i18n="settingLocationLabel">Localização (GPS)</span>
+          <span class="setting-hint" data-i18n="settingLocationHint">Necessária para o mapa, a distância à próxima paragem e a chegada automática.</span>
+        </span>
+        <button id="enableLocationBtn" class="setting-action-btn" type="button" data-i18n="settingActivate">Ativar</button>
+      </div>
+      <div class="setting-row">
+        <span>
+          <span class="setting-label" data-i18n="settingCameraLabel">Câmara</span>
+          <span class="setting-hint" data-i18n="settingCameraHint">Necessária para ler o código QR da rota.</span>
+        </span>
+        <button id="enableCameraBtn" class="setting-action-btn" type="button" data-i18n="settingActivate">Ativar</button>
+      </div>
       <div class="modal-actions">
         <button id="settingsCloseBtn" class="btn-ghost-lg" data-i18n="close">Fechar</button>
       </div>

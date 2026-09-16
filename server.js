@@ -101,6 +101,13 @@ const DEFAULT_FUEL_PRICE = { price: 1.65, currency: "EUR" };
 
 const MAX_OPTIMIZE_STOPS = Math.max(3, Number(process.env.MAX_OPTIMIZE_STOPS || 250));
 
+// The only two profiles routing.js ever asks OSRM/Valhalla/Google for.
+// `mode` used to go straight from the request body into a template-literal
+// URL path segment sent to OSRM (`${base}/route/v1/${mode}/...`) with no
+// check at all — an arbitrary string there could reshape which OSRM path
+// actually gets hit. Validated once here for both endpoints that accept it.
+const VALID_TRAVEL_MODES = ["driving", "walking"];
+
 if (!API_KEY) {
   console.error(
     "Erro: GOOGLE_MAPS_API_KEY nao definida.\n" +
@@ -896,6 +903,26 @@ function normalizeKey(s) {
     .replace(/\s+/g, " ");
 }
 
+// Shared by the /reorder endpoints below (aliases, blocked,
+// delivery-times): rebuilds `list` to match the order of `keys` (values
+// of `keyField`, normalized the same way every other lookup here does).
+// A key the client sent that no longer matches anything is just skipped;
+// a row the client didn't mention (deleted from another tab mid-drag,
+// or simply omitted) keeps its relative place, appended at the end
+// rather than silently dropped.
+function reorderByKey(list, keyField, keys) {
+  const byKey = new Map(list.map((item) => [normalizeKey(item[keyField]), item]));
+  const used = new Set();
+  const ordered = [];
+  (Array.isArray(keys) ? keys : []).forEach((k) => {
+    const nk = normalizeKey(String(k));
+    const item = byKey.get(nk);
+    if (item && !used.has(nk)) { ordered.push(item); used.add(nk); }
+  });
+  list.forEach((item) => { if (!used.has(normalizeKey(item[keyField]))) ordered.push(item); });
+  return ordered;
+}
+
 // GET /api/aliases -> lists all saved aliases
 app.get("/api/aliases", (req, res) => {
   res.json(readAliases());
@@ -951,6 +978,13 @@ app.delete("/api/aliases", (req, res) => {
   }
   const key = normalizeKey(from);
   const list = readAliases().filter((a) => normalizeKey(a.from) !== key);
+  writeAliases(list);
+  res.json(list);
+});
+
+// PUT /api/aliases/reorder  Body: { keys: string[] }  (each "from", new order)
+app.put("/api/aliases/reorder", (req, res) => {
+  const list = reorderByKey(readAliases(), "from", (req.body || {}).keys);
   writeAliases(list);
   res.json(list);
 });
@@ -1022,6 +1056,13 @@ app.delete("/api/delivery-times", (req, res) => {
   }
   const key = normalizeKey(address);
   const list = readDeliveryTimes().filter((d) => normalizeKey(d.address) !== key);
+  writeDeliveryTimes(list);
+  res.json(list);
+});
+
+// PUT /api/delivery-times/reorder  Body: { keys: string[] }  (each address, new order)
+app.put("/api/delivery-times/reorder", (req, res) => {
+  const list = reorderByKey(readDeliveryTimes(), "address", (req.body || {}).keys);
   writeDeliveryTimes(list);
   res.json(list);
 });
@@ -1110,6 +1151,13 @@ app.delete("/api/blocked", (req, res) => {
   res.json(list);
 });
 
+// PUT /api/blocked/reorder  Body: { keys: string[] }  (each address, new order)
+app.put("/api/blocked/reorder", (req, res) => {
+  const list = reorderByKey(readBlocked(), "address", (req.body || {}).keys);
+  writeBlocked(list);
+  res.json(list);
+});
+
 // -----------------------------------------------------------------------
 // POST /api/distance
 // Body: { origin: string, destination: string, mode: "driving"|"walking" }
@@ -1121,6 +1169,9 @@ app.post("/api/distance", async (req, res) => {
 
   if (!origin || !destination) {
     return res.status(400).json({ error: "origin e destination sao obrigatorios" });
+  }
+  if (mode != null && !VALID_TRAVEL_MODES.includes(mode)) {
+    return res.status(400).json({ error: `mode tem de ser um de: ${VALID_TRAVEL_MODES.join(", ")}` });
   }
 
   const travelMode = mode || "driving";
@@ -1566,6 +1617,9 @@ app.post("/api/optimize", async (req, res) => {
   if (addresses.length > MAX_OPTIMIZE_STOPS) {
     return res.status(400).json({ error: `maximo de ${MAX_OPTIMIZE_STOPS} enderecos por otimizacao (MAX_OPTIMIZE_STOPS)` });
   }
+  if (mode != null && !VALID_TRAVEL_MODES.includes(mode)) {
+    return res.status(400).json({ error: `mode tem de ser um de: ${VALID_TRAVEL_MODES.join(", ")}` });
+  }
 
   const restrictedFlags = Array.isArray(restricted) && restricted.length === addresses.length
     ? restricted.map(Boolean)
@@ -1627,24 +1681,38 @@ app.post("/api/optimize", async (req, res) => {
     const order = await optimizeOrderAsync(durations, !!roundTrip, {
       deadlines: deadlineArr, startMinutes: startMin, stopMinutes: stopMin, lockedIndices: lockedIndicesArr,
     });
-    const lateStops = computeLatenessReport(order, durations, deadlineArr, startMin, stopMin);
+
+    // A stop the optimizer couldn't fully route around still gets placed
+    // (see optimizer.js's own comment on this) — Infinity edges in
+    // `durations` for it, which JSON.stringify silently turns into `null`
+    // for every second/lateness field that touches it, with nothing
+    // telling the dispatcher WHY. unreachableIndices makes that explicit,
+    // same signal /api/road-exclusion/preview already gives for the
+    // identical underlying situation.
+    const unreachableIndices = unreachableStops(durations, { lastIsFinal: !roundTrip });
+    const lateStops = computeLatenessReport(order, durations, deadlineArr, startMin, stopMin)
+      .filter((s) => Number.isFinite(s.lateByMinutes)); // an Infinity gap isn't "late", it's unreachable — covered by unreachableIndices instead
 
     // What the reorder actually bought, measured on the matrix the
     // optimizer worked from. Reported rather than left implicit: the app
     // silently rewrote the list and the only way to tell whether that
     // helped was to eyeball the total before and after — and if those
     // two numbers ever disagree with these, the disagreement is the bug
-    // worth chasing, not the optimizer.
+    // worth chasing, not the optimizer. null (not a bogus finite number)
+    // when an unreachable stop makes the total meaningless.
     const given = durations.map((_, i) => i);
-    const givenSeconds = routeSeconds(durations, given);
-    const optimizedSeconds = routeSeconds(durations, order);
+    const givenSecondsRaw = routeSeconds(durations, given);
+    const optimizedSecondsRaw = routeSeconds(durations, order);
+    const givenSeconds = Number.isFinite(givenSecondsRaw) ? givenSecondsRaw : null;
+    const optimizedSeconds = Number.isFinite(optimizedSecondsRaw) ? optimizedSecondsRaw : null;
 
     res.json({
       order,
       lateStops,
+      unreachableIndices,
       givenSeconds,
       optimizedSeconds,
-      savedSeconds: givenSeconds - optimizedSeconds,
+      savedSeconds: givenSeconds != null && optimizedSeconds != null ? givenSeconds - optimizedSeconds : null,
     });
   } catch (err) {
     res.status(500).json({ error: err.message || "Falha ao otimizar a rota" });

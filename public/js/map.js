@@ -629,6 +629,15 @@
   let animationLastFrameTime = null;
   let animationStopMarkers = null; // [{ seq, address, distance }], in route order
   let animationNextStopIdx = 0;
+  // pointAtDistance()'s own fromIndex cursor for the per-frame scan below
+  // — animationProgress only ever increases while playing, so each frame
+  // can resume scanning right where the last one left off instead of
+  // re-walking the whole route geometry from the start every time.
+  let animationScanIndex = 1;
+  // nextStopPoint only actually changes when animationNextStopIdx does —
+  // recomputing it via a full pointAtDistance() scan on every frame
+  // (as opposed to once per stop) was pure waste.
+  let animationNextStopPointCache = null;
   let animationDwellTimeoutId = null;
   let animationTooltipEl = null;
   let animationPassedSeqs = new Set(); // seqs already reached — drives the "modern" style's greyed-out/checkmark look
@@ -1340,21 +1349,27 @@
     const baseSpeedMps = animationCumulative.total / (animationDurationMs / 1000);
     animationProgress = Math.min(animationProgress + baseSpeedMps * animationSpeed * deltaSeconds, animationCumulative.total);
 
-    const { point, slicedCoords } = pointAtDistance(animationCumulative, animationProgress, 1);
+    const { point, slicedCoords, nextIndex } = pointAtDistance(animationCumulative, animationProgress, animationScanIndex);
+    animationScanIndex = nextIndex; // resume from here next frame instead of rescanning from the start
     setSourceData('animation-progress-line', { type: 'Feature', geometry: { type: 'LineString', coordinates: slicedCoords }, properties: {} });
     setSourceData('animation-marker', { type: 'Feature', geometry: { type: 'Point', coordinates: point }, properties: {} });
 
     // Camera timeline stays entirely separate from the route timeline
     // above — it only ever reads the position just computed, never slows
-    // or speeds up the animation itself.
+    // or speeds up the animation itself. nextStopPoint only changes when
+    // animationNextStopIdx does (see the cache invalidation below), not
+    // every frame, so it's cached instead of rescanned each time.
     const nextStop = animationStopMarkers[animationNextStopIdx];
-    const nextStopPoint = nextStop ? pointAtDistance(animationCumulative, nextStop.distance, 1).point : null;
-    updateAnimationCamera(point, nextStopPoint);
+    if (animationNextStopPointCache === null && nextStop) {
+      animationNextStopPointCache = pointAtDistance(animationCumulative, nextStop.distance, 1).point;
+    }
+    updateAnimationCamera(point, nextStop ? animationNextStopPointCache : null);
 
     if (animationNextStopIdx < animationStopMarkers.length
         && animationProgress >= animationStopMarkers[animationNextStopIdx].distance) {
       const stop = animationStopMarkers[animationNextStopIdx];
       animationNextStopIdx++;
+      animationNextStopPointCache = null; // the next stop changed — recompute its point next frame
       beginDwell(stop);
       return;
     }
@@ -1382,6 +1397,8 @@
     animationStopMarkers = null;
     animationProgress = 0;
     animationNextStopIdx = 0;
+    animationScanIndex = 1;
+    animationNextStopPointCache = null;
     animationLastFrameTime = null;
     animateControlsExpanded = false;
     animationFollowMode = true;
@@ -1405,6 +1422,8 @@
     if (!animationCumulative) return;
     animationProgress = 0;
     animationNextStopIdx = 0;
+    animationScanIndex = 1;
+    animationNextStopPointCache = null;
     animationLastFrameTime = null;
     animateControlsExpanded = true;
     animationSessionActive = true;
