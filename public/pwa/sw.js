@@ -16,7 +16,7 @@
 // answer (or a real failure the app's own sync queue can react to), not
 // a stale cached one.
 
-const SHELL_CACHE_NAME = "rt-pwa-shell-v4";
+const SHELL_CACHE_NAME = "rt-pwa-shell-v10";
 const TILE_CACHE_NAME = "rt-pwa-tiles-v1";
 
 const SHELL_FILES = [
@@ -31,6 +31,7 @@ const SHELL_FILES = [
   "/pwa/js/sync.js",
   "/pwa/js/scanner.js",
   "/pwa/js/list.js",
+  "/pwa/js/proof.js",
   "/pwa/js/map.js",
   "/pwa/js/app.js",
   "/pwa/icons/icon-192.png",
@@ -69,7 +70,8 @@ function isApiRequest(url) {
 // needing to know the exact URL shape either uses.
 function isTileRequest(url) {
   return url.hostname.endsWith("openfreemap.org") || url.hostname.endsWith("maptiler.com")
-    || url.hostname.endsWith("arcgisonline.com"); // satellite tiles (map.js) — default style, must work offline too
+    || url.hostname.endsWith("arcgisonline.com") // satellite tiles (map.js)
+    || url.hostname === "wmts.geo.admin.ch"; // swisstopo — the default style, must work offline too
 }
 
 async function cacheFirst(request, cacheName) {

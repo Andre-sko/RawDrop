@@ -24,5 +24,17 @@
     load()[k] = v;
     try { localStorage.setItem(KEY, JSON.stringify(cache)); } catch (e) { /* ignora */ }
   }
-  global.RTSettings = { get, set, DEFAULTS };
+  // Card/pin number for a stop. With "excludeStartEnd" on, the depot at
+  // order 0 is hidden, so the first real delivery must read "1", not "2"
+  // — the server's order is untouched, only the label shifts.
+  function numberOffset(stops) {
+    return get("excludeStartEnd") && stops.some((s) => s.isStartEnd && s.order === 0) ? 1 : 0;
+  }
+  function stopNumber(stop, stops) { return stop.order + 1 - numberOffset(stops); }
+  // "↺ Repor" put a closed stop back in the list: still pending, but it
+  // carries the timestamp of the mark that was undone — a fresh stop never
+  // has one. Shown as ↺ on the card and the pin so it isn't mistaken for
+  // a stop nobody has been to yet.
+  function isUndone(stop) { return stop.status === "pending" && !!stop.clientTimestamp; }
+  global.RTSettings = { get, set, DEFAULTS, stopNumber, isUndone };
 })(window);

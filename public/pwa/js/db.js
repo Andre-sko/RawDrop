@@ -127,6 +127,53 @@
     });
   }
 
+  // The office re-shared the same link (pushed over SSE, or fetched on
+  // wake-up): the server's stops replace the local ones wholesale — its
+  // order is final — EXCEPT for a mark the phone made and hasn't managed
+  // to send yet, which must survive by address (ids embed the position,
+  // so they may all have changed). Queue entries are re-pointed at the
+  // new ids the same way, in the same transaction.
+  async function replaceStops(newStops) {
+    const db = await openDb();
+    const hashOf = (id) => String(id).split("-")[1];
+    return new Promise((resolve, reject) => {
+      const t = db.transaction(["stops", "queue"], "readwrite");
+      const stopsStore = t.objectStore("stops");
+      const queueStore = t.objectStore("queue");
+      const getAll = stopsStore.getAll();
+      getAll.onsuccess = () => {
+        const localByHash = new Map(getAll.result.map((s) => [hashOf(s.id), s]));
+        const newIdByHash = new Map(newStops.map((s) => [hashOf(s.id), s.id]));
+        stopsStore.clear();
+        for (const incoming of newStops) {
+          const local = localByHash.get(hashOf(incoming.id));
+          const merged = { ...incoming, dirty: false };
+          if (local && local.dirty) {
+            merged.status = local.status;
+            merged.statusReason = local.statusReason;
+            merged.clientTimestamp = local.clientTimestamp;
+            merged.proof = local.proof;
+            merged.dirty = true;
+          }
+          stopsStore.put(merged);
+        }
+        const cursorReq = queueStore.openCursor();
+        cursorReq.onsuccess = () => {
+          const cursor = cursorReq.result;
+          if (!cursor) return;
+          const newId = newIdByHash.get(hashOf(cursor.value.stopId));
+          if (!newId) cursor.delete(); // the stop left the list — nothing to report any more
+          else if (newId !== cursor.value.stopId) cursor.update({ ...cursor.value, stopId: newId });
+          cursor.continue();
+        };
+        cursorReq.onerror = () => reject(cursorReq.error);
+      };
+      getAll.onerror = () => reject(getAll.error);
+      t.oncomplete = () => resolve();
+      t.onerror = () => reject(t.error);
+    });
+  }
+
   // --- sync queue -------------------------------------------------------
 
   async function enqueueSync(item) {
@@ -191,7 +238,7 @@
 
   global.RTDB = {
     saveRoute, getRoute,
-    saveStops, getStops, getStop, updateStopLocal, updateStopAndEnqueue,
+    saveStops, replaceStops, getStops, getStop, updateStopLocal, updateStopAndEnqueue,
     enqueueSync, getQueue, updateQueueItem, removeFromQueue, countQueue, reconcileDirtyStops,
     clearAll,
   };

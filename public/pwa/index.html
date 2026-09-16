@@ -71,7 +71,11 @@
   <!-- "Fechar paragem?" modal -->
   <div id="stopModal" class="modal-overlay" hidden>
     <div class="modal">
-      <h2 id="modalAddress"></h2>
+      <div class="modal-address-row">
+        <h2 id="modalAddress"></h2>
+        <button id="modalCopyBtn" class="icon-btn" type="button" data-i18n-title="copyTitle" title="Copiar endereço">📋</button>
+        <a id="modalMapsLink" class="icon-btn" href="#" target="_blank" rel="noopener" data-i18n-title="mapsTitle" title="Navegar">📍</a>
+      </div>
       <div class="modal-meta" id="modalMeta"></div>
       <div class="modal-question" data-i18n="closeStop">Fechar paragem?</div>
       <div class="modal-actions">
@@ -81,6 +85,44 @@
       </div>
     </div>
   </div>
+
+  <!-- Presente / Ausente (after ✓) — see js/proof.js -->
+  <div id="presenceModal" class="modal-overlay" hidden>
+    <div class="modal">
+      <h2 id="presenceAddress"></h2>
+      <div class="modal-question" data-i18n="presenceQuestion">Cliente presente?</div>
+      <div class="modal-actions">
+        <button id="presencePresentBtn" class="btn-ok-lg">🖊️ <span data-i18n="present">Presente — assinar</span></button>
+        <button id="presencePhotoBtn" class="btn-ghost-lg">📷 <span id="presencePhotoLabel"></span></button>
+        <button id="presenceAbsentBtn" class="btn-fail-lg">✗ <span data-i18n="absentFailed">Ausente — não entregue</span></button>
+        <button id="presenceCancelBtn" class="btn-ghost-lg" data-i18n="cancel">Cancelar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Recipient name (before the signature pad) -->
+  <div id="nameModal" class="modal-overlay" hidden>
+    <div class="modal">
+      <h2 data-i18n="recipientName">Nome de quem recebe</h2>
+      <input id="nameInput" type="text" class="text-input" autocomplete="off" autocapitalize="words" data-i18n-placeholder="recipientNamePlaceholder" placeholder="Nome" />
+      <div class="modal-actions">
+        <button id="nameConfirmBtn" class="btn-ok-lg" data-i18n="continueBtn">Continuar</button>
+        <button id="nameCancelBtn" class="btn-ghost-lg" data-i18n="cancel">Cancelar</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Full-screen signature pad: only the name and the pad, handed to the customer -->
+  <div id="sigScreen" class="sig-screen" hidden>
+    <div id="sigName" class="sig-name"></div>
+    <canvas id="sigCanvas" class="sig-canvas"></canvas>
+    <div class="sig-actions">
+      <button id="sigCancelBtn" class="btn-ghost-lg" data-i18n="cancel">Cancelar</button>
+      <button id="sigClearBtn" class="btn-ghost-lg" data-i18n="clear">Limpar</button>
+      <button id="sigConfirmBtn" class="btn-ok-lg" data-i18n="confirm" disabled>Confirmar</button>
+    </div>
+  </div>
+  <input id="photoInput" type="file" accept="image/*" capture="environment" class="offscreen-input" tabindex="-1" aria-hidden="true" />
 
   <!-- Fail-reason modal -->
   <div id="reasonModal" class="modal-overlay" hidden>
@@ -157,6 +199,7 @@
 <script src="/pwa/js/sync.js"></script>
 <script src="/pwa/js/scanner.js"></script>
 <script src="/pwa/js/list.js"></script>
+<script src="/pwa/js/proof.js"></script>
 <script src="/pwa/js/map.js"></script>
 <script src="/pwa/js/app.js"></script>
 </body>

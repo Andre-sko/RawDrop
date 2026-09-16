@@ -4,7 +4,7 @@
 // style switching); this one displays a fixed, already-decided route to
 // the driver and follows them along it. OpenStreetMap tiles: attribution
 // is left to MapLibre's own AttributionControl, which reads it straight
-// from the style's sources (see RTConfig.getMapStyleUrl doc comment).
+// from the style's sources (see RTConfig.getMapStyle doc comment).
 //
 // What it draws, all from the share (nothing computed here, nothing
 // fetched): the route line (already routed around the dispatcher's road
@@ -22,11 +22,16 @@
 (function (global) {
   "use strict";
 
+  // Pin colours: red = has a deadline (priority), blue = walk-only,
+  // amber = plain pending, green ✓ done, grey ✗ failed. A pending stop
+  // that was put back with "↺ Repor" keeps its colour and gets a ↺.
   const PENDING_COLOR = "#E8A33D";
+  const PRIORITY_COLOR = "#E2665B";
   const WALK_COLOR = "#5B8FD6";
   const DONE_COLOR = "#4CAF6E";
-  const FAILED_COLOR = "#E2665B";
+  const FAILED_COLOR = "#6B7280";
   const RESTRICTION_COLOR = "#E2665B";
+  const ROUTE_COLOR = "#1E5BFF"; // same blue as the office map — readable on the swisstopo base
 
   const ARRIVE_RADIUS_M = 40;
   const ARRIVE_DWELL_MS = 5000;
@@ -36,9 +41,9 @@
 
   const t = (k, v) => (global.RTI18n ? RTI18n.t(k, v) : k);
 
-  // Base map styles — 'dark' is RTConfig's usual vector style, 'satellite'
-  // reuses the same key-free Esri raster tiles as the office app's map
-  // (public/js/map.js) for a consistent look between the two apps.
+  // Base map styles — 'topo' is RTConfig's swisstopo map with house
+  // numbers (the office app's default too), 'satellite' the same key-free
+  // Esri raster tiles as the office app's map (public/js/map.js).
   const MAP_STYLE_STORAGE_KEY = "route-tracker-pwa-map-style";
   const SATELLITE_TILES = {
     tiles: ["https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}"],
@@ -53,13 +58,13 @@
         layers: [{ id: "base-raster-layer", type: "raster", source: "base-raster" }],
       };
     }
-    return RTConfig.getMapStyleUrl();
+    return RTConfig.getMapStyle();
   }
 
   function loadStoredStyle() {
     try {
-      return localStorage.getItem(MAP_STYLE_STORAGE_KEY) === "dark" ? "dark" : "satellite";
-    } catch (_) { return "satellite"; }
+      return localStorage.getItem(MAP_STYLE_STORAGE_KEY) === "satellite" ? "satellite" : "topo";
+    } catch (_) { return "topo"; }
   }
 
   let map = null;
@@ -87,7 +92,15 @@
   function statusColor(stop) {
     if (stop.status === "delivered") return DONE_COLOR;
     if (stop.status === "failed") return FAILED_COLOR;
-    return stop.walkOnly ? WALK_COLOR : PENDING_COLOR;
+    if (stop.walkOnly) return WALK_COLOR;
+    return stop.deadline ? PRIORITY_COLOR : PENDING_COLOR;
+  }
+
+  function pinText(stop) {
+    if (stop.status === "delivered") return "✓";
+    if (stop.status === "failed") return "✗";
+    const n = String(RTSettings.stopNumber(stop, stops));
+    return RTSettings.isUndone(stop) ? "↺" + n : n;
   }
 
   function haversineM(a, b) {
@@ -103,7 +116,8 @@
     const el = document.createElement("div");
     el.className = "map-pin";
     el.style.background = statusColor(stop);
-    el.textContent = stop.status === "pending" ? String(stop.order + 1) : "✓";
+    el.textContent = pinText(stop);
+    if (el.textContent.length > 2) el.classList.add("map-pin-small");
     return el;
   }
 
@@ -141,15 +155,20 @@
     });
   }
 
-  function ensureLineSource(id, paint, layout) {
+  function ensureLineSource(id, paint, layout, casing) {
     if (map.getSource(id)) return;
     map.addSource(id, { type: "geojson", data: { type: "FeatureCollection", features: [] } });
-    map.addLayer({ id: id + "-layer", type: "line", source: id, layout: Object.assign({ "line-join": "round", "line-cap": "round" }, layout || {}), paint });
+    const line = Object.assign({ "line-join": "round", "line-cap": "round" }, layout || {});
+    // White halo under the route: without it the line disappeared into
+    // the roads it follows on the swisstopo map.
+    if (casing) map.addLayer({ id: id + "-casing-layer", type: "line", source: id, layout: line, paint: casing });
+    map.addLayer({ id: id + "-layer", type: "line", source: id, layout: line, paint });
   }
 
   function renderGeometry(geometry) {
     lastGeometry = geometry;
-    ensureLineSource("route-line", { "line-color": PENDING_COLOR, "line-width": 4, "line-opacity": 0.85 });
+    ensureLineSource("route-line", { "line-color": ROUTE_COLOR, "line-width": 4 }, null,
+      { "line-color": "#ffffff", "line-width": 8, "line-opacity": 0.9 });
     map.getSource("route-line").setData({ type: "Feature", geometry: geometry || { type: "LineString", coordinates: [] }, properties: {} });
   }
 
@@ -173,7 +192,7 @@
   // overlays, not style layers, so only those two need re-adding once the
   // new style has finished loading.
   function setMapStyle(id) {
-    if (!map || (id !== "dark" && id !== "satellite")) return;
+    if (!map || (id !== "topo" && id !== "satellite")) return;
     mapStyle = id;
     try { localStorage.setItem(MAP_STYLE_STORAGE_KEY, id); } catch (_) { /* private browsing etc */ }
     if (satelliteBtn) satelliteBtn.classList.toggle("active", id === "satellite");
@@ -237,7 +256,7 @@
     }
     nextStopBar.innerHTML =
       `<div class="next-stop-label">${t("nextStop")}</div>` +
-      `<div class="next-stop-main"><span class="next-stop-num">${next.order + 1}</span>` +
+      `<div class="next-stop-main"><span class="next-stop-num">${RTSettings.stopNumber(next, stops)}</span>` +
       `<span class="next-stop-addr">${next.walkOnly ? "🚶 " : ""}${escapeHtml(next.address)}</span></div>` +
       `<div class="next-stop-detail">${detail}${next.deadline ? ` · 🎯 ${escapeHtml(next.deadline)}` : ""}</div>`;
     nextStopBar.onclick = () => { if (onMarkerTap) onMarkerTap(next.id); };
@@ -337,7 +356,7 @@
     if (locateBtn) locateBtn.addEventListener("click", () => { setFollowing(!following); if (following && !lastFix) startTracking(); });
     if (satelliteBtn) {
       satelliteBtn.classList.toggle("active", mapStyle === "satellite");
-      satelliteBtn.addEventListener("click", () => setMapStyle(mapStyle === "satellite" ? "dark" : "satellite"));
+      satelliteBtn.addEventListener("click", () => setMapStyle(mapStyle === "satellite" ? "topo" : "satellite"));
     }
     setFollowing(true);
     return new Promise((resolve) => map.on("load", resolve));

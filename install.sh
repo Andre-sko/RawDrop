@@ -133,28 +133,73 @@ info "Setup — every step asks first, so you can skip what you already have."
 
 step "1/7  Checking prerequisites"
 
+# Everything the app needs from the operating system, in one place —
+# the "requirements file" for the non-npm side. Node packages themselves
+# are in package.json / package-lock.json (installed in step 3).
+#   node >= 18 + npm   required
+#   curl or wget       map extract download (step 5)
+#   docker             OSRM + Valhalla (optional — routing falls back to Google)
+#   ffmpeg, tesseract  "Video → Address" tab only (step 2)
+
+# install_pkg <apt-name> <brew-name> <dnf-name> — best effort, one package.
+install_pkg() {
+  if command -v apt-get >/dev/null 2>&1; then sudo apt-get update && sudo apt-get install -y "$1"
+  elif command -v brew >/dev/null 2>&1; then brew install "$2"
+  elif command -v dnf >/dev/null 2>&1; then sudo dnf install -y "$3"
+  else return 1
+  fi
+}
+
+# Node 18+ via the NodeSource repo on apt (Ubuntu/Debian's own `nodejs`
+# is often too old), the package manager elsewhere.
+install_node() {
+  if command -v apt-get >/dev/null 2>&1; then
+    if command -v curl >/dev/null 2>&1; then
+      curl -fsSL https://deb.nodesource.com/setup_20.x | sudo -E bash - && sudo apt-get install -y nodejs
+    else
+      sudo apt-get update && sudo apt-get install -y nodejs npm
+    fi
+  elif command -v brew >/dev/null 2>&1; then brew install node@20 && brew link --overwrite node@20
+  elif command -v dnf >/dev/null 2>&1; then sudo dnf install -y nodejs npm
+  else return 1
+  fi
+}
+
 MISSING_CORE=0
 
-if command -v node >/dev/null 2>&1; then
-  NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
-  if [ "$NODE_MAJOR" -ge 18 ] 2>/dev/null; then
-    ok "Node $(node -v)"
-  else
-    fail "Node $(node -v) is too old — this app needs Node 18 or newer."
-    MISSING_CORE=1
-  fi
-else
-  fail "Node is not installed. Get it from https://nodejs.org (18 or newer)."
-  MISSING_CORE=1
+if ! command -v curl >/dev/null 2>&1 && ! command -v wget >/dev/null 2>&1; then
+  warn "Neither curl nor wget is installed (needed to download the map extract)."
+  if ask_yn "Install curl now?" y; then install_pkg curl curl curl && ok "curl installed" || fail "could not install curl"; fi
 fi
 
-if command -v npm >/dev/null 2>&1; then ok "npm $(npm -v)"; else fail "npm is not installed."; MISSING_CORE=1; fi
+NODE_OK=0
+if command -v node >/dev/null 2>&1; then
+  NODE_MAJOR="$(node -p 'process.versions.node.split(".")[0]' 2>/dev/null || echo 0)"
+  if [ "$NODE_MAJOR" -ge 18 ] 2>/dev/null; then NODE_OK=1; ok "Node $(node -v)"; else fail "Node $(node -v) is too old — this app needs Node 18 or newer."; fi
+else
+  fail "Node is not installed."
+fi
+if [ "$NODE_OK" -eq 0 ]; then
+  if ask_yn "Install Node 20 now?" y; then
+    install_node && command -v node >/dev/null 2>&1 && ok "Node $(node -v)" || { fail "Node install failed — get it from https://nodejs.org (18 or newer)."; MISSING_CORE=1; }
+  else
+    MISSING_CORE=1
+  fi
+fi
+
+if command -v npm >/dev/null 2>&1; then ok "npm $(npm -v)"; else fail "npm is not installed (it ships with Node)."; MISSING_CORE=1; fi
 
 if detect_docker; then
   ok "Docker reachable ($DOCKER)"
 else
   warn "No usable Docker — the OSRM and Valhalla steps will be skipped."
   note "The app still runs without them: routing falls back to Google and the map stays hidden."
+  if command -v apt-get >/dev/null 2>&1 && ! command -v docker >/dev/null 2>&1; then
+    if ask_yn "Install Docker (docker.io) now?" n; then
+      sudo apt-get update && sudo apt-get install -y docker.io && sudo systemctl enable --now docker \
+        && detect_docker && ok "Docker reachable ($DOCKER)" || fail "Docker install failed — see https://docs.docker.com/engine/install/"
+    fi
+  fi
 fi
 
 if [ "$MISSING_CORE" -eq 1 ]; then
@@ -203,16 +248,18 @@ step "3/7  Node dependencies"
 
 if [ -d node_modules ]; then
   ok "node_modules already present"
-  if ask_yn "Run 'npm install' anyway (to pick up changes)?" n; then
-    npm install && ok "Dependencies up to date" || fail "npm install failed"
+  if ask_yn "Run 'npm ci' anyway (to pick up changes)?" n; then
+    npm ci && ok "Dependencies up to date" || fail "npm ci failed"
   else
-    skipped "npm install"
+    skipped "npm ci"
   fi
 else
-  if ask_yn "Run 'npm install' now?" y; then
-    npm install && ok "Dependencies installed" || fail "npm install failed"
+  # npm ci = exactly what package-lock.json says, nothing newer — the same
+  # versions on every machine, and it refuses to run if the lock is stale.
+  if ask_yn "Run 'npm ci' now?" y; then
+    npm ci && ok "Dependencies installed" || fail "npm ci failed"
   else
-    skipped "npm install"
+    skipped "npm ci"
     warn "The server will not start without this."
   fi
 fi

@@ -21,7 +21,7 @@ const {
   VALID_GEOCODING_SOURCES, GEOCODING_SOURCE,
   VALID_ROUTING_SOURCES, ROUTING_SOURCE, OSRM_URL, OSRM_URL_WALKING,
   VALHALLA_URL, MAX_BLOCK_SEGMENT_METERS,
-  DATA_DIR, ALIASES_FILE, BLOCKED_FILE, DELIVERY_TIMES_FILE,
+  DATA_DIR, ALIASES_FILE, BLOCKED_FILE, DELIVERY_TIMES_FILE, DEPOSIT_FILE, PROOFS_DIR,
   GEOCODE_CACHE_FILE, DISTANCE_CACHE_FILE, anthropic, FUEL_CURRENCY,
 } = require("./src/config");
 const {
@@ -50,8 +50,10 @@ const {
   setOverride: setAccessOverride, deleteOverride: deleteAccessOverride,
 } = require("./src/accessOverrides");
 const {
-  ROUTE_SHARE_TTL_MS, createRouteShare, getRouteShare, getShareStatus, updateStopStatus,
+  ROUTE_SHARE_TTL_MS, createRouteShare, replaceRouteShareStops, getRouteShare, getShareStatus,
+  updateStopStatus, setStopProof,
 } = require("./src/routeShares");
+const shareEvents = require("./src/shareEvents");
 
 // Resolves addresses to [lng, lat] points, skipping any that fail to
 // geocode — used only to decide which restrictions are geographically
@@ -330,13 +332,28 @@ app.get("/api/share/:token", (req, res) => {
   if (status.expired) {
     return res.status(410).json({ error: "rota expirada", reason: "expired" });
   }
-  const share = status.share;
-  res.json({
+  res.json(sharePayload(status.share));
+});
+
+// The JSON the phone works from — same shape whether it arrives via the
+// GET above (scan, relaunch, wake-up) or pushed on the SSE stream below.
+function sharePayload(share) {
+  return {
     token: share.token,
     expiresAt: share.expiresAt,
-    route: { roundTrip: share.roundTrip, createdAt: share.createdAt, geometry: share.geometry, restrictions: share.restrictions || [] },
+    route: { roundTrip: share.roundTrip, createdAt: share.createdAt, geometry: share.geometry, legs: share.legs || [], restrictions: share.restrictions || [] },
     stops: share.stops,
-  });
+  };
+}
+
+// GET /api/share/:token/events — SSE stream, public like the GET above.
+// Pushes `event: route` (the full payload) whenever the office re-shares
+// this same link after changing the list — see src/shareEvents.js.
+app.get("/api/share/:token/events", (req, res) => {
+  const status = getShareStatus(req.params.token);
+  if (!status.found) return res.status(404).json({ error: "link invalido", reason: "not_found" });
+  if (status.expired) return res.status(410).json({ error: "rota expirada", reason: "expired" });
+  shareEvents.subscribe(req.params.token, req, res);
 });
 
 // POST /api/share/:token/stop/:id  Body: { status, reason?, clientTimestamp? }
@@ -354,6 +371,45 @@ app.post("/api/share/:token/stop/:id", (req, res) => {
   if (result.error === "invalid_status") return res.status(400).json({ error: "status tem de ser pending, delivered ou failed" });
 
   res.json({ ...result.stop, applied: result.applied });
+});
+
+// POST /api/share/:token/stop/:id/proof  multipart: image + type + name?
+// Proof of delivery: the recipient's signature (type=signature, with
+// their name) or a photo of the parcel left at the door (type=photo).
+// Public like the other two, token-gated. Stored on disk under
+// PROOFS_DIR/<token>/<stopId>.<ext> — no database, same as everything
+// else in data/; the stop record just points at the file.
+const PROOF_TYPES = ["signature", "photo"];
+const proofUpload = multer({
+  storage: multer.diskStorage({
+    destination: (req, file, cb) => {
+      const dir = path.join(PROOFS_DIR, req.params.token.replace(/[^0-9a-f]/gi, ""));
+      fs.mkdirSync(dir, { recursive: true });
+      cb(null, dir);
+    },
+    filename: (req, file, cb) => {
+      const ext = file.mimetype === "image/png" ? ".png" : ".jpg";
+      cb(null, `${req.params.id.replace(/[^0-9a-zA-Z-]/g, "")}${ext}`);
+    },
+  }),
+  limits: { fileSize: 8 * 1024 * 1024 },
+  fileFilter: (req, file, cb) => cb(null, /^image\/(png|jpe?g|webp)$/.test(file.mimetype)),
+});
+app.post("/api/share/:token/stop/:id/proof", proofUpload.single("image"), (req, res) => {
+  const { type, name } = req.body || {};
+  if (!req.file) return res.status(400).json({ error: "image (png/jpeg) e obrigatorio" });
+  if (!PROOF_TYPES.includes(type)) {
+    try { fs.unlinkSync(req.file.path); } catch (e) { /* ignora */ }
+    return res.status(400).json({ error: "type tem de ser signature ou photo" });
+  }
+  const result = setStopProof(req.params.token, req.params.id, {
+    type, name, file: path.relative(PROOFS_DIR, req.file.path),
+  });
+  if (result.error) {
+    try { fs.unlinkSync(req.file.path); } catch (e) { /* ignora */ }
+    return res.status(404).json({ error: result.error === "not_found" ? "link invalido ou expirado" : "paragem nao encontrada" });
+  }
+  res.json(result.stop);
 });
 
 // -----------------------------------------------------------------------
@@ -514,7 +570,7 @@ app.use(express.static(path.join(__dirname, "public")));
 // todos" links (public/manage.html reads the kind from the URL). Behind
 // the same login as the rest of the interface, since the static block
 // above sits after the auth middleware.
-const MANAGE_KINDS = ["addresses", "aliases", "blocked", "delivery-times"];
+const MANAGE_KINDS = ["addresses", "aliases", "blocked", "delivery-times", "deposit"];
 app.get("/manage/:kind", (req, res) => {
   if (!MANAGE_KINDS.includes(req.params.kind)) return res.status(404).send("Not found");
   res.sendFile(path.join(__dirname, "public", "manage.html"));
@@ -808,7 +864,7 @@ app.post("/api/share-export", async (req, res) => {
 // after the auth middleware); the two endpoints the resulting link is
 // for do not, on purpose — see their own comments near GET /shared/:token.
 app.post("/api/share/route", async (req, res) => {
-  const { addresses, roundTrip, deadlines, originalAddresses, restricted } = req.body || {};
+  const { addresses, roundTrip, deadlines, originalAddresses, restricted, token } = req.body || {};
   if (!Array.isArray(addresses) || addresses.length === 0 || addresses.some((a) => typeof a !== "string" || !a.trim())) {
     return res.status(400).json({ error: "addresses tem de ser uma lista de texto nao vazia" });
   }
@@ -835,26 +891,53 @@ app.post("/api/share/route", async (req, res) => {
   // three steps as POST /api/route. Missing Valhalla or any routing error
   // just means no polyline; the share itself still succeeds.
   let geometry = null;
+  let legs = [];
   let restrictionsForDriver = [];
+  // Only the geometry per leg is kept — distance/duration text is the
+  // office's concern, and the share is re-sent on every update.
+  const legGeometries = (route) => (route.legs || []).map((l) => ({ geometry: l.geometry, unreachable: !!l.unreachable }));
   if (VALHALLA_URL) {
+    const points = coords.filter(Boolean).map((c) => [c.lng, c.lat]);
+    const relevant = restrictionsNear(points, listActiveRestrictions());
+    const { polygons } = buildExcludePolygonsPayload(relevant);
     try {
-      const points = coords.filter(Boolean).map((c) => [c.lng, c.lat]);
-      const relevant = restrictionsNear(points, listActiveRestrictions());
-      const { polygons } = buildExcludePolygonsPayload(relevant);
       const route = restrictedFlags.some(Boolean)
         ? await valhallaRouteMixed(addresses, restrictedFlags, { excludePolygons: polygons })
         : await valhallaRoute(addresses, { excludePolygons: polygons });
       geometry = route.geometry;
+      legs = legGeometries(route);
       restrictionsForDriver = relevant.map((r) => ({ id: r.id, geometry: r.geometry, reason: r.reason || null }));
     } catch (err) {
-      geometry = null;
+      // One leg with no route (a block on a stop's own doorstep) used to
+      // cost the driver the WHOLE line — same leg-by-leg fallback as
+      // /api/route, so only that stretch is a straight placeholder.
+      try {
+        const gapped = await valhallaRouteAllowingGaps(addresses, { excludePolygons: polygons });
+        geometry = gapped.geometry;
+        legs = legGeometries(gapped);
+        restrictionsForDriver = relevant.map((r) => ({ id: r.id, geometry: r.geometry, reason: r.reason || null }));
+      } catch (gapErr) {
+        geometry = null;
+      }
     }
   }
 
-  const share = createRouteShare({
-    addresses, coords, deadlines, roundTrip, geometry,
-    originalAddresses: originals, restrictedFlags, restrictions: restrictionsForDriver,
-  });
+  // "Permissão de depósito" (data/deposit.json) is matched here, on the
+  // text the dispatcher typed, the same way the office matches walk-only
+  // addresses — the phone only ever sees the resulting flag.
+  const depositKeys = new Set(readDeposit().map((d) => normalizeKey(d.address)));
+  const depositFlags = addresses.map((a, i) => depositKeys.has(normalizeKey((originals && originals[i]) || a)));
+
+  const shareParams = {
+    addresses, coords, deadlines, roundTrip, geometry, legs,
+    originalAddresses: originals, restrictedFlags, depositFlags, restrictions: restrictionsForDriver,
+  };
+  // `token`: the office re-sharing today's link after a change — the
+  // phone keeps the same QR and gets the new list pushed (SSE). Falls
+  // back to a fresh share when that token is gone or expired.
+  const replaced = typeof token === "string" && token ? replaceRouteShareStops(token, shareParams) : null;
+  const share = replaced || createRouteShare(shareParams);
+  if (replaced) shareEvents.broadcast(share.token, "route", sharePayload(share));
 
   try {
     const { url, qrDataUrl, usedLanFallback, lanFallbackFailed, usedManualOverride } = await buildShareUrlAndQr(req, share.token);
@@ -866,6 +949,7 @@ app.post("/api/share/route", async (req, res) => {
       usedLanFallback,
       lanFallbackFailed,
       usedManualOverride,
+      replaced: !!replaced,
       unresolvedAddresses: addresses.filter((_, i) => !coords[i]),
     });
   } catch (err) {
@@ -1155,6 +1239,56 @@ app.delete("/api/blocked", (req, res) => {
 app.put("/api/blocked/reorder", (req, res) => {
   const list = reorderByKey(readBlocked(), "address", (req.body || {}).keys);
   writeBlocked(list);
+  res.json(list);
+});
+
+// -----------------------------------------------------------------------
+// Deposit permission: addresses where the parcel may be left when nobody
+// answers — the driver photographs it instead of marking the stop
+// failed (see the PWA's "Ausente" flow). data/deposit.json, same shape
+// and endpoints as blocked.json: [{ address, note, createdAt }]
+// -----------------------------------------------------------------------
+function readDeposit() {
+  try {
+    if (!fs.existsSync(DEPOSIT_FILE)) return [];
+    const parsed = JSON.parse(fs.readFileSync(DEPOSIT_FILE, "utf-8"));
+    return Array.isArray(parsed) ? parsed : [];
+  } catch (err) {
+    console.error("Aviso: nao foi possivel ler data/deposit.json:", err.message);
+    return [];
+  }
+}
+
+app.get("/api/deposit", (req, res) => {
+  res.json(readDeposit());
+});
+
+app.post("/api/deposit", (req, res) => {
+  const { address, note } = req.body || {};
+  if (!address || typeof address !== "string" || !address.trim()) {
+    return res.status(400).json({ error: "address e obrigatorio" });
+  }
+  const list = readDeposit();
+  const key = normalizeKey(address);
+  const entry = { address: address.trim(), note: String(note || "").trim(), createdAt: new Date().toISOString() };
+  const idx = list.findIndex((d) => normalizeKey(d.address) === key);
+  if (idx >= 0) list[idx] = entry; else list.push(entry);
+  writeJsonAtomic(DEPOSIT_FILE, list);
+  res.json(list);
+});
+
+app.delete("/api/deposit", (req, res) => {
+  const { address } = req.body || {};
+  if (!address) return res.status(400).json({ error: "address e obrigatorio" });
+  const key = normalizeKey(address);
+  const list = readDeposit().filter((d) => normalizeKey(d.address) !== key);
+  writeJsonAtomic(DEPOSIT_FILE, list);
+  res.json(list);
+});
+
+app.put("/api/deposit/reorder", (req, res) => {
+  const list = reorderByKey(readDeposit(), "address", (req.body || {}).keys);
+  writeJsonAtomic(DEPOSIT_FILE, list);
   res.json(list);
 });
 

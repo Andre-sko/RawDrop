@@ -198,7 +198,8 @@ button, input {
 .stop-main { flex: 1; min-width: 0; cursor: pointer; }
 .stop-address { font-size: 15.5px; line-height: 1.35; word-break: break-word; }
 .stop-meta { display: flex; align-items: center; gap: 6px; margin-top: 8px; flex-wrap: wrap; }
-.stop-meta .icon-btn {
+.stop-meta .icon-btn, .modal-address-row .icon-btn {
+  display: inline-flex; align-items: center; justify-content: center; text-decoration: none;
   min-width: 40px; min-height: 40px;
   border-radius: 8px;
   border: 1px solid var(--border);
@@ -255,6 +256,8 @@ button, input {
   padding: 22px 20px calc(22px + env(safe-area-inset-bottom));
 }
 .modal h2 { font-size: 17px; margin: 0 0 4px; word-break: break-word; }
+.modal-address-row { display: flex; align-items: flex-start; gap: 8px; }
+.modal-address-row h2 { flex: 1; }
 .modal-meta { color: var(--muted); font-size: 13px; margin-bottom: 14px; }
 .modal-question { font-size: 15px; margin-bottom: 14px; font-weight: 600; }
 .modal-actions { display: flex; flex-direction: column; gap: 10px; }
@@ -470,6 +473,12 @@ button, input {
   font-size: 12px; padding: 3px 8px; border-radius: 999px;
   background: rgba(91,143,214,0.18); color: #8FB4E8;
 }
+.undo-badge {
+  display: inline-flex; align-items: center; gap: 3px;
+  font-size: 12px; padding: 3px 8px; border-radius: 999px;
+  background: rgba(232,163,61,0.18); color: var(--accent);
+}
+.map-pin-small { font-size: 10px; letter-spacing: -0.5px; }
 .sync-fail-badge {
   display: inline-flex; align-items: center; gap: 3px;
   font-size: 12px; padding: 3px 8px; border-radius: 999px;
@@ -555,3 +564,33 @@ input, select, button { font-size: max(16px, 1em); }
   .map-style-btn { bottom: calc(12px + 52px + 10px); }
   .maplibregl-ctrl-bottom-right { right: 74px; }
 }
+
+/* --- proof of delivery (js/proof.js) ------------------------------------ */
+.text-input {
+  width: 100%; box-sizing: border-box;
+  min-height: 48px; margin: 8px 0 14px;
+  border-radius: 12px; border: 1px solid var(--border);
+  background: var(--panel-2); color: var(--text);
+  font-size: 17px; padding: 0 14px;
+}
+/* The whole screen is the pad: the phone is handed over, so nothing else
+   (nav, list, our own chrome) may be on it. */
+.sig-screen {
+  position: fixed; inset: 0; z-index: 60;
+  display: flex; flex-direction: column;
+  background: #fff; color: #111;
+  padding: calc(16px + env(safe-area-inset-top)) 16px calc(16px + env(safe-area-inset-bottom));
+}
+.sig-screen[hidden] { display: none; }
+.sig-name { font-size: 26px; font-weight: 700; text-align: center; margin-bottom: 12px; word-break: break-word; }
+.sig-canvas {
+  flex: 1; width: 100%; min-height: 0;
+  border: 2px dashed #999; border-radius: 12px;
+  touch-action: none; /* strokes, not scrolling */
+}
+.sig-actions { display: flex; gap: 10px; margin-top: 12px; }
+.sig-actions button { flex: 1; }
+.sig-actions .btn-ghost-lg { background: #f0f0f0; color: #111; border-color: #ccc; }
+.sig-actions .btn-ok-lg:disabled { opacity: 0.4; cursor: default; }
+/* Not display:none — iOS Safari ignores .click() on a hidden file input. */
+.offscreen-input { position: fixed; left: -9999px; top: 0; width: 1px; height: 1px; opacity: 0; }

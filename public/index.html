@@ -125,6 +125,7 @@ Torre de Belém, Lisboa"></textarea>
       <div class="hint" data-i18n="blockedParkingHint" style="margin-top:-4px; margin-bottom:10px;">Se souberes onde a carrinha consegue estacionar perto deste endereço, o troço divide-se automaticamente em carro até lá + a pé até à porta. Sem isto, o troço inteiro é calculado a pé.</div>
       <div id="blockedList" class="scroll-list recent-list"></div>
       <a class="btn-ghost manage-link" id="blockedManageLink" href="/manage/blocked" data-kind="blocked" target="_blank" rel="noopener"><span data-i18n="manageAllBtn">Gerir todos</span> <span class="list-count" id="blockedCount"></span></a>
+      <a class="btn-ghost manage-link" href="/manage/deposit" target="_blank" rel="noopener" style="margin-top:8px;" data-i18n="depositManageLink">🏠 Permissão de depósito</a>
     </div>
 
     <div class="sidebar-section">
@@ -214,6 +215,7 @@ Torre de Belém, Lisboa"></textarea>
             <button class="map-tool-btn" id="mapToolAnimate" type="button" data-i18n="mapToolAnimate">▶️ Animar rota</button>
             <button class="map-tool-btn" id="mapToolRecenter" type="button" title="Centrar no mapa a rota inteira" data-i18n="mapToolRecenter">🎯 Centrar rota</button>
             <button class="map-tool-btn" id="mapToolShareDriver" type="button" data-i18n-title="shareRouteBtnTitle" title="Partilhar rota com o condutor (app de entregas)" data-i18n="shareRouteBtn">📱 Partilhar com condutor</button>
+            <button class="map-tool-btn" id="mapToolUpdateDriver" type="button" data-i18n-title="updateDriverBtnTitle" title="Enviar esta rota para o telemóvel do condutor sem novo QR" data-i18n="updateDriverBtn">🔄 Atualizar condutor</button>
             <button class="map-tool-btn" id="mapToolFullscreen" type="button" data-i18n-title="mapFullscreenTitle" title="Mapa em ecrã inteiro (Esc para sair)" data-i18n="mapFullscreen">⛶ Ecrã inteiro</button>
             <div id="pinStyleGroup" style="display:none;gap:8px;">
               <button class="map-tool-btn" id="pinStyleClassic" type="button" data-pin-style="classic" data-i18n="pinStyleClassic">Clássico</button>
@@ -232,10 +234,9 @@ Torre de Belém, Lisboa"></textarea>
           <div id="mapHint" class="map-hint" style="display:none;"></div>
           <div id="mapContainer" style="display:none;"></div>
           <div id="mapStyleGroup" class="map-style-group" style="display:none;">
-            <button class="map-style-btn" id="mapStyleDark" type="button" data-style="dark" data-i18n="mapStyleDark">Escuro</button>
+            <button class="map-style-btn" id="mapStyleTopo" type="button" data-style="topo" data-i18n="mapStyleTopo">Topográfico</button>
             <button class="map-style-btn" id="mapStyleLight" type="button" data-style="light" data-i18n="mapStyleLight">Minimalista</button>
             <button class="map-style-btn" id="mapStyleSatellite" type="button" data-style="satellite" data-i18n="mapStyleSatellite">Satélite</button>
-            <button class="map-style-btn" id="mapStyleTopo" type="button" data-style="topo" data-i18n="mapStyleTopo">Topográfico</button>
           </div>
           <div id="mapEmptyState" class="empty-state" data-i18n="mapEmptyState">Calcula uma rota para a veres no mapa.</div>
           <div id="mapComparisonPanel" class="map-comparison-panel" style="display:none;"></div>
@@ -1909,7 +1910,12 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
   // long-lived (24h), trackable route for the driver's phone: see
   // POST /api/share/route in server.js. Distinct from shareAddressesViaQr
   // above, which only ever sends plain text.
-  async function shareRouteWithDriver(){
+  const DRIVER_SHARE_TOKEN_KEY = 'driverShareToken';
+  // mode: 'share'  — a NEW link: always ends in the QR code to scan.
+  //       'update' — today's link (token kept in localStorage): the phone
+  //                  gets the new list pushed over SSE, no QR to scan; with
+  //                  no live link yet, it says so instead of guessing.
+  async function shareRouteWithDriver(mode){
     const { addresses: rawAddresses, deadlines: deadlineMinutes, roundTrip } = buildTextAddresses();
     if(rawAddresses.length < 1){
       showStatus(t('shareRouteNeedsRoute'), 'error');
@@ -1929,24 +1935,43 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
     // API wants "HH:MM" strings, same as /api/delivery-times.
     const deadlines = deadlineMinutes.map(m => m == null ? null :
       `${String(Math.floor(m/60)).padStart(2,'0')}:${String(m%60).padStart(2,'0')}`);
+    // Today's link, so a re-share after a change updates the phone in
+    // place (SSE) instead of handing out a new QR — the server falls back
+    // to a fresh share when this token is gone or expired.
+    let token = null;
+    if(mode === 'update'){
+      try{ token = localStorage.getItem(DRIVER_SHARE_TOKEN_KEY) || null; } catch(e){ /* ignora */ }
+      if(!token){
+        showStatus(t('updateDriverNoLink'), 'error');
+        return;
+      }
+    }
     try{
       const res = await fetch('/api/share/route', {
         method: 'POST',
         headers: {'Content-Type': 'application/json'},
-        body: JSON.stringify({ addresses, deadlines, roundTrip, originalAddresses: rawAddresses, restricted }),
+        body: JSON.stringify({ addresses, deadlines, roundTrip, originalAddresses: rawAddresses, restricted, token }),
       });
       const data = await res.json();
       if(!res.ok){
         showStatus(data.error || t('shareRouteError'), 'error');
         return;
       }
+      try{ localStorage.setItem(DRIVER_SHARE_TOKEN_KEY, data.token); } catch(e){ /* ignora */ }
+      if(data.replaced){
+        showStatus(t('shareRouteUpdated'), 'ok');
+        return; // the phone already has it — no new QR to scan
+      }
+      if(mode === 'update') showStatus(t('updateDriverExpired'), 'info'); // link was gone — a fresh QR follows
       showQrModal(data.url, data.qrDataUrl, data.expiresInMinutes, data.usedLanFallback, data.lanFallbackFailed);
     } catch(err){
       showStatus(t('serverContactError'), 'error');
     }
   }
   const mapToolShareDriverBtn = $('mapToolShareDriver');
-  if(mapToolShareDriverBtn) mapToolShareDriverBtn.addEventListener('click', shareRouteWithDriver);
+  if(mapToolShareDriverBtn) mapToolShareDriverBtn.addEventListener('click', () => shareRouteWithDriver('share'));
+  const mapToolUpdateDriverBtn = $('mapToolUpdateDriver');
+  if(mapToolUpdateDriverBtn) mapToolUpdateDriverBtn.addEventListener('click', () => shareRouteWithDriver('update'));
 
   async function handleExport(format){
     if(!lastRouteData) return;

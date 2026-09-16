@@ -108,6 +108,10 @@ const DISTANCE_CACHE_FILE = path.join(DATA_DIR, "distance-cache.json");
 const ROAD_RESTRICTIONS_FILE = path.join(DATA_DIR, "road-restrictions.json");
 const ACCESS_OVERRIDES_FILE = path.join(DATA_DIR, "access-overrides.json");
 const ROUTE_SHARES_FILE = path.join(DATA_DIR, "route-shares.json");
+const DEPOSIT_FILE = path.join(DATA_DIR, "deposit.json");
+// Proof-of-delivery images (signature PNGs, parcel photos) from the
+// driver's phone, one folder per route share: proofs/<token>/<stopId>.<ext>
+const PROOFS_DIR = path.join(DATA_DIR, "proofs");
 const FUEL_SETTINGS_FILE = path.join(DATA_DIR, "fuel-settings.json");
 
 // Live fuel price (see src/fuel.js). Defaults point at the French
@@ -164,6 +168,8 @@ module.exports = {
   ROAD_RESTRICTIONS_FILE,
   ACCESS_OVERRIDES_FILE,
   ROUTE_SHARES_FILE,
+  DEPOSIT_FILE,
+  PROOFS_DIR,
   FUEL_SETTINGS_FILE,
   FUEL_PRICE_API_URL,
   FUEL_PRICE_RADIUS_KM,

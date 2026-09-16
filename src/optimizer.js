@@ -45,7 +45,18 @@
 //     even be expressed. Index 0 (always) and, on a round trip, the
 //     last index (also always) are already fixed the same way, whether
 //     or not the caller repeats them here.
-function optimizeOrder(durations, roundTrip, options) {
+function optimizeOrder(rawDurations, roundTrip, options) {
+  // An Infinity edge (Valhalla: no route between that pair, e.g. a block
+  // on a stop's own doorstep) must not poison every total: with Infinity
+  // in the sum, every candidate order ties at Infinity, no move ever
+  // reads as "cheaper", and the whole round comes back exactly as given
+  // — the unreachable stop stuck wherever it sat AND nothing else
+  // optimized either. Capped at a cost no real edge or lateness penalty
+  // approaches, so the optimizer first minimizes how many impossible
+  // edges the order crosses, then everything else as usual.
+  // 250 stops × 1e9 still sums exactly in a double.
+  const UNREACHABLE_EDGE_SECONDS = 1e9;
+  const durations = rawDurations.map((row) => row.map((d) => (Number.isFinite(d) ? d : UNREACHABLE_EDGE_SECONDS)));
   const n = durations.length;
   const lastIdx = n - 1;
   const fixLast = !!roundTrip && n > 2;

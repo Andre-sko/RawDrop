@@ -154,21 +154,42 @@
   // Positron/Dark-Matter designs as open vector styles on its own free,
   // no-key infrastructure, so those replace CARTO here instead of
   // asking for an account.
+  //
+  // 'topo' is the swisstopo national map (free WMTS, no key) — the map
+  // every Swiss driver already knows — with OSM house numbers drawn on
+  // top from OpenFreeMap's vector tiles, since swisstopo's own raster
+  // has none at any zoom. Replaced the old OpenFreeMap dark style as the
+  // default; the same style object lives in public/pwa/js/config.js.
+  const TOPO_STYLE = {
+    version: 8,
+    glyphs: 'https://tiles.openfreemap.org/fonts/{fontstack}/{range}.pbf',
+    sources: {
+      'base-raster': {
+        type: 'raster', tileSize: 256, maxzoom: 19,
+        tiles: ['https://wmts.geo.admin.ch/1.0.0/ch.swisstopo.pixelkarte-farbe/default/current/3857/{z}/{x}/{y}.jpeg'],
+        attribution: '&copy; <a href="https://www.swisstopo.admin.ch">swisstopo</a>',
+      },
+      'osm': { type: 'vector', url: 'https://tiles.openfreemap.org/planet', attribution: '&copy; OpenStreetMap contributors' },
+    },
+    layers: [
+      { id: 'base-raster-layer', type: 'raster', source: 'base-raster' },
+      {
+        id: 'housenumbers', type: 'symbol', source: 'osm', 'source-layer': 'housenumber', minzoom: 16,
+        layout: { 'text-field': ['get', 'housenumber'], 'text-font': ['Noto Sans Bold'], 'text-size': ['interpolate', ['linear'], ['zoom'], 16, 9, 19, 13], 'text-padding': 1 },
+        paint: { 'text-color': '#B3261E', 'text-halo-color': '#ffffff', 'text-halo-width': 1.4 },
+      },
+    ],
+  };
   const MAP_STYLES = {
-    dark: { type: 'url', url: 'https://tiles.openfreemap.org/styles/dark' },
+    topo: { type: 'style', style: TOPO_STYLE },
     light: { type: 'url', url: 'https://tiles.openfreemap.org/styles/positron' },
     satellite: {
       type: 'raster',
       tiles: ['https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'],
       attribution: 'Tiles &copy; Esri — Source: Esri, Maxar, Earthstar Geographics, and the GIS User Community',
     },
-    topo: {
-      type: 'raster',
-      tiles: ['a', 'b', 'c'].map((s) => `https://${s}.tile.opentopomap.org/{z}/{x}/{y}.png`),
-      attribution: '&copy; OpenStreetMap contributors, SRTM | &copy; <a href="https://opentopomap.org">OpenTopoMap</a> (CC-BY-SA)',
-    },
   };
-  const DEFAULT_MAP_STYLE = 'dark';
+  const DEFAULT_MAP_STYLE = 'topo';
   const MAP_STYLE_STORAGE_KEY = 'routeTrackerMapStyle';
 
   function loadStoredMapStyle() {
@@ -184,6 +205,7 @@
     const chosen = MAP_STYLES[styleId] ? styleId : DEFAULT_MAP_STYLE;
     const style = MAP_STYLES[chosen];
     if (style.type === 'url') return style.url; // MapLibre fetches+owns this style entirely
+    if (style.type === 'style') return style.style;
     return {
       version: 8,
       sources: { 'base-raster': { type: 'raster', tiles: style.tiles, tileSize: 256, attribution: style.attribution } },
@@ -197,6 +219,7 @@
   // applyPinStyle() — it never touches map.setStyle()/sources.
   const MODERN_GREY = '#5B6472'; // "before optimizing" / "already visited" — neutral, not a state color
   const MODERN_AMBER = '#E8A33D'; // matches the app's existing amber accent
+  const ROUTE_BLUE = '#1E5BFF'; // the route line in 'classic' — readable on the swisstopo base (was amber, invisible there)
   const MODERN_ROUTE_BLUE = '#3B7CF5'; // the un-travelled route line in 'modern' — sampled from the reference "Animar rota" video the user pointed to
   const MODERN_PROGRESS_GREEN = '#4FAE7C'; // the travelled stretch during "Animar rota" in 'modern' — same green as the moving marker
   const WALK_ONLY_BLUE = '#5B8FD6'; // same blue as the "Agrupar (a pé)" tool and its list — one colour, one meaning, everywhere: "the van doesn't drive here"
@@ -291,10 +314,18 @@
   // the new style JSON.
   function addOverlayLayers() {
     map.addSource('route-line', { type: 'geojson', data: EMPTY_FC });
+    // White casing under the line: on the swisstopo map (white ground,
+    // black buildings, green trees) a bare coloured line vanished into
+    // the roads it followed — the halo is what keeps it readable.
+    map.addLayer({
+      id: 'route-line-casing-layer', type: 'line', source: 'route-line',
+      layout: { 'line-join': 'round', 'line-cap': 'round' },
+      paint: { 'line-color': '#ffffff', 'line-width': 8, 'line-opacity': 0.9 },
+    });
     map.addLayer({
       id: 'route-line-layer', type: 'line', source: 'route-line',
       layout: { 'line-join': 'round', 'line-cap': 'round' },
-      paint: { 'line-color': '#E8A33D', 'line-width': 4 },
+      paint: { 'line-color': ROUTE_BLUE, 'line-width': 4 },
     });
 
     map.addSource('preview-route-line', { type: 'geojson', data: EMPTY_FC });
@@ -527,7 +558,7 @@
     // green as it goes (see animation-progress-line-layer just below).
     map.setPaintProperty('route-line-layer', 'line-color', modern
       ? ['case', ['get', 'unreachable'], '#E2665B', ['get', 'optimized'], MODERN_ROUTE_BLUE, MODERN_GREY]
-      : ['case', ['get', 'unreachable'], '#E2665B', MODERN_AMBER]);
+      : ['case', ['get', 'unreachable'], '#E2665B', ROUTE_BLUE]);
 
     // The traced "already traveled" highlight during "Animar rota" — white
     // (today's look) in 'classic', green in 'modern' (same green as the

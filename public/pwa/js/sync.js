@@ -49,13 +49,25 @@
     return Math.min(MAX_DELAY_MS, BASE_DELAY_MS * Math.pow(2, attempts));
   }
 
+  // Two steps for a stop with a proof: the status first (tiny, and what
+  // the office is waiting for), then the image. `statusSent` on the queue
+  // item remembers that step 1 landed, so a failed upload retries only
+  // the upload — never a second status write with a stale timestamp.
   async function sendOne(item) {
-    const res = await fetch(`/api/share/${encodeURIComponent(token)}/stop/${encodeURIComponent(item.stopId)}`, {
-      method: "POST",
-      headers: { "Content-Type": "application/json" },
-      body: JSON.stringify({ status: item.status, reason: item.reason, clientTimestamp: item.clientTimestamp }),
-    });
-    return res;
+    if (!item.statusSent) {
+      const res = await fetch(`/api/share/${encodeURIComponent(token)}/stop/${encodeURIComponent(item.stopId)}`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ status: item.status, reason: item.reason, clientTimestamp: item.clientTimestamp }),
+      });
+      if (!res.ok || !item.proof) return res;
+      await RTDB.updateQueueItem(item.id, { statusSent: true });
+    }
+    const form = new FormData();
+    form.append("type", item.proof.type);
+    if (item.proof.name) form.append("name", item.proof.name);
+    form.append("image", item.proof.blob, item.proof.type === "signature" ? "signature.png" : "photo.jpg");
+    return fetch(`/api/share/${encodeURIComponent(token)}/stop/${encodeURIComponent(item.stopId)}/proof`, { method: "POST", body: form });
   }
 
   // Processes every due queue item once. Network failures (offline, DNS,
@@ -83,6 +95,7 @@
                 updatedAt: body.updatedAt,
                 dirty: false,
                 lastSyncError: null,
+                ...(body.proof ? { proof: { type: body.proof.type, name: body.proof.name, at: body.proof.at } } : {}),
               });
             }
             await RTDB.removeFromQueue(item.id);
@@ -124,9 +137,35 @@
     periodicTimer = setInterval(flush, PERIODIC_FLUSH_MS);
     window.addEventListener("online", flush);
     document.addEventListener("visibilitychange", () => {
-      if (document.visibilityState === "visible") flush();
+      if (document.visibilityState === "visible") { flush(); refetchRoute(); }
     });
   }
 
-  global.RTSync = { setToken, kick, flush, start, onQueueChange };
+  // --- live route updates (SSE) --------------------------------------------
+  // The office re-sharing today's link pushes the new list here within a
+  // second (see src/shareEvents.js). EventSource reconnects by itself
+  // after a dead zone; a phone that slept through a push catches up with
+  // one plain GET when the screen comes back (refetchRoute, above).
+  let source = null;
+  let onRoute = null;
+
+  function startLive(routeToken, handler) {
+    onRoute = handler;
+    if (source) source.close();
+    if (!routeToken || typeof EventSource === "undefined") return;
+    source = new EventSource(`/api/share/${encodeURIComponent(routeToken)}/events`);
+    source.addEventListener("route", (ev) => {
+      try { onRoute(JSON.parse(ev.data)); } catch (_) { /* a bad frame is just skipped */ }
+    });
+  }
+
+  async function refetchRoute() {
+    if (!token || !onRoute) return;
+    try {
+      const res = await fetch(`/api/share/${encodeURIComponent(token)}`);
+      if (res.ok) onRoute(await res.json());
+    } catch (_) { /* offline — the stream will bring the next one */ }
+  }
+
+  global.RTSync = { setToken, kick, flush, start, onQueueChange, startLive };
 })(window);

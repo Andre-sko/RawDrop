@@ -17,6 +17,7 @@
 //     createdAt: string (ISO),
 //     expiresAt: string (ISO),
 //     geometry: GeoJSON LineString | null,  // driving geometry for the map screen, best-effort
+//     legs: [{ geometry: LineString, unreachable: boolean }],  // stop i -> i+1, for "navigate via" waypoints
 //     restrictions: [{ id, geometry: LineString, reason }],  // active road exclusions near the route
 //     stops: [
 //       {
@@ -25,6 +26,7 @@
 //         address: string,          // what the driver reads (dispatcher's text, alias unresolved)
 //         routedAs: string | null,  // the alias target it was actually routed with, when different
 //         walkOnly: boolean,        // van can't reach it — driver walks the last leg
+//         depositAllowed: boolean,  // may be left at the door + photographed when nobody answers
 //         lat: number | null,       // null when geocoding failed for this address
 //         lng: number | null,
 //         deadline: string | null,  // "HH:MM", when known
@@ -33,6 +35,7 @@
 //         clientTimestamp: string | null, // ISO, when the DEVICE says the mark happened
 //         serverTimestamp: string | null, // ISO, when the SERVER received it
 //         updatedAt: string | null,       // == serverTimestamp of the last applied update
+//         proof: { type: "signature" | "photo", name, file, at } | null,  // file: relative to PROOFS_DIR
 //       }
 //     ]
 //   }
@@ -141,9 +144,8 @@ function pruneExpired() {
 // `addresses[i]` — the caller (server.js) is responsible for that
 // alignment; a missing or malformed entry just leaves that stop's
 // lat/lng or deadline null rather than failing the whole share.
-function createRouteShare({ addresses, coords, deadlines, roundTrip, geometry, originalAddresses, restrictedFlags, restrictions }) {
-  const now = Date.now();
-  const stops = addresses.map((address, i) => {
+function buildStops({ addresses, coords, deadlines, roundTrip, originalAddresses, restrictedFlags, depositFlags }) {
+  return addresses.map((address, i) => {
     const c = coords && coords[i];
     const deadline = deadlines && typeof deadlines[i] === "string" ? deadlines[i] : null;
     const original = originalAddresses && typeof originalAddresses[i] === "string" && originalAddresses[i].trim() ? originalAddresses[i].trim() : null;
@@ -162,6 +164,10 @@ function createRouteShare({ addresses, coords, deadlines, roundTrip, geometry, o
       // is an exact signal, not a heuristic.
       isStartEnd: !!roundTrip && (i === 0 || i === addresses.length - 1),
       walkOnly: !!(restrictedFlags && restrictedFlags[i]),
+      // Office-managed "permissão de depósito" list (data/deposit.json):
+      // the driver may leave the parcel and photograph it when nobody
+      // answers, instead of marking the stop failed.
+      depositAllowed: !!(depositFlags && depositFlags[i]),
       lat: c && typeof c.lat === "number" ? c.lat : null,
       lng: c && typeof c.lng === "number" ? c.lng : null,
       deadline,
@@ -170,8 +176,15 @@ function createRouteShare({ addresses, coords, deadlines, roundTrip, geometry, o
       clientTimestamp: null,
       serverTimestamp: null,
       updatedAt: null,
+      proof: null, // { type: "signature" | "photo", name, file, at } — see server.js's proof upload
     };
   });
+}
+
+function createRouteShare(params) {
+  const { roundTrip, geometry, legs, restrictions } = params;
+  const now = Date.now();
+  const stops = buildStops(params);
 
   const entry = {
     token: generateShareToken(),
@@ -184,6 +197,10 @@ function createRouteShare({ addresses, coords, deadlines, roundTrip, geometry, o
     // never changes for a given share and a driver may open the map
     // screen many times over the work day.
     geometry: geometry || null,
+    // The same line split per stop-to-stop leg: what lets the phone hand
+    // Google Maps intermediate points so its turn-by-turn follows OUR
+    // detour around a road block instead of routing straight through it.
+    legs: Array.isArray(legs) ? legs : [],
     // Active road exclusions the route had to respect, for the driver's
     // map to draw (id + LineString + reason) — nothing the driver can
     // edit, just "this street is closed, that's why the line bends".
@@ -195,6 +212,47 @@ function createRouteShare({ addresses, coords, deadlines, roundTrip, geometry, o
   shares.push(entry);
   persist();
   return entry;
+}
+
+// Fields a driver's phone wrote (or will still write via a queued sync)
+// — everything else is the office's to rebuild.
+const DRIVER_FIELDS = ["status", "statusReason", "clientTimestamp", "serverTimestamp", "updatedAt", "proof"];
+
+// The office re-shares the same link after changing the list (a
+// re-optimization, an added stop): the stops are rebuilt exactly as for
+// a new share, in the new order, then whatever the driver already did is
+// carried over BY ADDRESS — the id embeds the position, so it cannot be
+// the key here. A stop that left the list takes its state with it.
+function replaceRouteShareStops(token, params) {
+  const share = getRouteShare(token);
+  if (!share || isExpired(share)) return null;
+
+  const previousByAddress = new Map(share.stops.map((s) => [s.address, s]));
+  const stops = buildStops(params);
+  for (const stop of stops) {
+    const previous = previousByAddress.get(stop.address);
+    if (!previous) continue;
+    for (const field of DRIVER_FIELDS) stop[field] = previous[field];
+  }
+
+  share.roundTrip = !!params.roundTrip;
+  share.geometry = params.geometry || null;
+  share.legs = Array.isArray(params.legs) ? params.legs : [];
+  share.restrictions = Array.isArray(params.restrictions) ? params.restrictions : [];
+  share.stops = stops;
+  persist();
+  return share;
+}
+
+// Finds a stop by id, falling back to the address hash alone: after
+// replaceRouteShareStops the position prefix of every id may have
+// changed, but a mark the phone queued offline still carries the OLD
+// id, and it is the address that identifies the delivery, not its slot.
+function findStop(share, id) {
+  const exact = share.stops.find((s) => s.id === id);
+  if (exact) return exact;
+  const hash = String(id).split("-")[1];
+  return hash ? share.stops.find((s) => s.id.endsWith("-" + hash)) || null : null;
 }
 
 // Used by the sync path (updateStopStatus): deliberately keeps working
@@ -232,7 +290,7 @@ function updateStopStatus(token, id, { status, reason, clientTimestamp } = {}) {
   const share = getRouteShare(token);
   if (!share) return { error: "not_found" };
 
-  const stop = share.stops.find((s) => s.id === id);
+  const stop = findStop(share, id);
   if (!stop) return { error: "stop_not_found" };
 
   if (!VALID_STATUSES.includes(status)) return { error: "invalid_status" };
@@ -252,10 +310,28 @@ function updateStopStatus(token, id, { status, reason, clientTimestamp } = {}) {
   return { stop, applied: true };
 }
 
+// Proof of delivery from the phone (a signature or a parcel photo — see
+// POST /api/share/:token/stop/:id/proof). Kept separate from the status
+// update on purpose: the status goes first, small and reliable, and the
+// image follows when there is bandwidth for it. `file` is the path
+// relative to PROOFS_DIR.
+function setStopProof(token, id, { type, name, file }) {
+  const share = getRouteShare(token);
+  if (!share) return { error: "not_found" };
+  const stop = findStop(share, id);
+  if (!stop) return { error: "stop_not_found" };
+  stop.proof = { type, name: (name || "").trim() || null, file, at: new Date().toISOString() };
+  persist();
+  return { stop };
+}
+
 module.exports = {
   ROUTE_SHARE_TTL_MS,
+  setStopProof,
   createRouteShare,
+  replaceRouteShareStops,
   getRouteShare,
   getShareStatus,
+  findStop,
   updateStopStatus,
 };

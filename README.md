@@ -40,8 +40,11 @@ Address" errors out.
 
 ### 2. Install dependencies
 
+Node packages are listed in `package.json` and pinned in
+`package-lock.json` — that pair is the requirements file:
+
 ```bash
-npm install
+npm ci        # exact versions from package-lock.json (npm install also works)
 ```
 
 ### 3. Configure the API key

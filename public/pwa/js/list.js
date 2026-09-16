@@ -24,20 +24,47 @@
     }[c]));
   }
 
-  function mapsUrl(stop) {
-    if (typeof stop.lat === "number" && typeof stop.lng === "number") {
-      return `https://www.google.com/maps/dir/?api=1&destination=${stop.lat},${stop.lng}`;
+  // Per-leg geometry from the share (route.legs, stop i -> i+1). Google
+  // Maps knows nothing about the office's road blocks, so left alone it
+  // navigates straight through a closed street; a few points picked off
+  // OUR leg (the Valhalla line that already detours) go in as waypoints
+  // and force its turn-by-turn onto the same detour.
+  let legs = null;
+  function setLegs(list) { legs = Array.isArray(list) ? list : null; }
+
+  const MAX_VIA_POINTS = 3; // Google's URL API allows 9; 3 is enough to pin a detour and keeps the URL short
+  function viaPoints(stop) {
+    const leg = legs && legs[stop.order - 1];
+    const coords = leg && leg.geometry && leg.geometry.coordinates;
+    if (!coords || coords.length < 4 || leg.unreachable) return [];
+    const out = [];
+    for (let k = 1; k <= MAX_VIA_POINTS; k++) {
+      const [lng, lat] = coords[Math.round((coords.length - 1) * k / (MAX_VIA_POINTS + 1))];
+      out.push(`${lat.toFixed(5)},${lng.toFixed(5)}`);
     }
-    return `https://www.google.com/maps/dir/?api=1&destination=${encodeURIComponent(stop.address)}`;
+    return out;
+  }
+
+  function mapsUrl(stop) {
+    const hasCoords = typeof stop.lat === "number" && typeof stop.lng === "number";
+    const destination = hasCoords ? `${stop.lat},${stop.lng}` : encodeURIComponent(stop.address);
+    let url = `https://www.google.com/maps/dir/?api=1&destination=${destination}&travelmode=${stop.walkOnly ? "walking" : "driving"}`;
+    const via = hasCoords ? viaPoints(stop) : [];
+    if (via.length) url += `&waypoints=${encodeURIComponent(via.join("|"))}`;
+    return url;
   }
 
   function statusLabel(stop) {
+    if (stop.status === "delivered" && stop.proof && stop.proof.type === "photo") return t("statusDeposited");
+    if (stop.status === "delivered" && stop.proof && stop.proof.type === "signature") {
+      return `${t("statusDelivered")} ✍️ ${escapeHtml(stop.proof.name || "")}`;
+    }
     if (stop.status === "delivered") return t("statusDelivered");
     if (stop.status === "failed") return `${t("statusFailed")}${stop.statusReason ? " — " + escapeHtml(stop.statusReason) : ""}`;
     return "";
   }
 
-  function cardHtml(stop, done) {
+  function cardHtml(stop, done, all) {
     const deadline = stop.deadline ? `<span class="deadline-badge">🎯 ${escapeHtml(stop.deadline)}</span>` : "";
     const walk = stop.walkOnly ? `<span class="walk-badge" title="${escapeHtml(t("walkOnlyTitle"))}">🚶 ${escapeHtml(t("walkOnly"))}</span>` : "";
     // Set when sync.js gave up retrying (a permanent 404/400, or a
@@ -45,6 +72,7 @@
     // itself is safe on the phone, but the office never got it. Tapping
     // the card and re-confirming the same status queues a fresh attempt.
     const syncFailed = stop.lastSyncError ? `<span class="sync-fail-badge" title="${escapeHtml(t("syncFailedTitle"))}">⚠ ${escapeHtml(t("syncFailedBadge"))}</span>` : "";
+    const undone = RTSettings.isUndone(stop) ? `<span class="undo-badge" title="${escapeHtml(t("undoneTitle"))}">↺ ${escapeHtml(t("undone"))}</span>` : "";
     const routedAs = stop.routedAs ? `<div class="stop-routed-as">📌 ${escapeHtml(stop.routedAs)}</div>` : "";
     const actions = done
       ? `<div class="stop-actions"><button class="btn-undo" data-action="undo" title="${escapeHtml(t("undoTitle"))}">${escapeHtml(t("undo"))}</button></div>`
@@ -56,7 +84,7 @@
 
     return `
       <article class="stop-card${done ? " stop-card-done" : ""}" data-id="${escapeHtml(stop.id)}">
-        <div class="stop-order">${stop.order + 1}</div>
+        <div class="stop-order">${RTSettings.stopNumber(stop, all)}</div>
         <div class="stop-main" data-action="open-modal">
           <div class="stop-address">${escapeHtml(stop.address)}</div>
           ${routedAs}
@@ -65,6 +93,7 @@
             <a class="icon-btn" data-action="maps" href="${mapsUrl(stop)}" target="_blank" rel="noopener" title="${escapeHtml(t("mapsTitle"))}">📍</a>
             ${deadline}
             ${walk}
+            ${undone}
             ${syncFailed}
           </div>
           ${statusRow}
@@ -96,9 +125,9 @@
     els.countDone.textContent = done.length;
     els.doneHeader.hidden = true; // redundant now — the counter above is the tab label
 
-    els.listPending.innerHTML = pending.map((s) => cardHtml(s, false)).join("") ||
+    els.listPending.innerHTML = pending.map((s) => cardHtml(s, false, stops)).join("") ||
       `<p class="empty-hint">${escapeHtml(t("noPending"))}</p>`;
-    els.listDone.innerHTML = done.map((s) => cardHtml(s, true)).join("") ||
+    els.listDone.innerHTML = done.map((s) => cardHtml(s, true, stops)).join("") ||
       `<p class="empty-hint">${escapeHtml(t("noDone"))}</p>`;
 
     applyTabVisibility();
@@ -140,6 +169,7 @@
   function openStopModal(stop) {
     modalStopId = stop.id;
     els.modalAddress.textContent = stop.address;
+    els.modalMapsLink.href = mapsUrl(stop);
     els.modalMeta.textContent = stop.deadline ? t("deadline", { time: stop.deadline }) : "";
     els.modalDeliveredBtn.hidden = stop.status === "delivered";
     els.modalFailedBtn.hidden = stop.status === "failed";
@@ -195,7 +225,7 @@
       if (action === "maps") return; // real <a>, let the browser handle it
       if (action === "ok") {
         ev.preventDefault();
-        callbacks.onMarkStop(id, "delivered", null);
+        callbacks.onDeliver(id);
         return;
       }
       if (action === "fail") {
@@ -213,6 +243,7 @@
       }
     });
 
+    els.modalCopyBtn.addEventListener("click", () => copyAddress(els.modalAddress.textContent));
     els.modalCancelBtn.addEventListener("click", closeStopModal);
     els.stopModal.addEventListener("click", (ev) => {
       if (ev.target === els.stopModal) closeStopModal(); // tap outside the card = cancel, never a silent close
@@ -220,7 +251,7 @@
     els.modalDeliveredBtn.addEventListener("click", () => {
       const id = modalStopId;
       closeStopModal();
-      callbacks.onMarkStop(id, "delivered", null);
+      callbacks.onDeliver(id);
     });
     els.modalFailedBtn.addEventListener("click", () => {
       const id = modalStopId;
@@ -258,5 +289,5 @@
     wireEvents(document);
   }
 
-  global.RTList = { init, render, showToast, FAIL_REASON_CODES };
+  global.RTList = { init, render, setLegs, showToast, FAIL_REASON_CODES };
 })(window);

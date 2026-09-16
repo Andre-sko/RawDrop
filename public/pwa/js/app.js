@@ -9,10 +9,13 @@
   ["scannerScreen", "scannerVideoWrap", "listScreen", "mapScreen", "video", "canvas", "scanStartBtn", "scanError",
    "navList", "navMap", "rescanBtn", "syncBadgeBtn",
    "counterPending", "counterDone", "countPending", "countDone", "doneHeader", "listPending", "listDone",
-   "stopModal", "modalAddress", "modalMeta", "modalDeliveredBtn", "modalFailedBtn", "modalCancelBtn",
+   "stopModal", "modalAddress", "modalCopyBtn", "modalMapsLink", "modalMeta", "modalDeliveredBtn", "modalFailedBtn", "modalCancelBtn",
    "reasonModal", "reasonFreeText", "reasonConfirmBtn", "reasonCancelBtn",
    "toast", "mapContainer", "locateBtn", "satelliteBtn", "nextStopBar", "expiredBanner", "loadingOverlay",
-   "settingsBtn", "settingsModal", "settingsCloseBtn", "autoArriveToggle", "excludeStartEndToggle", "enableLocationBtn", "enableCameraBtn"]
+   "settingsBtn", "settingsModal", "settingsCloseBtn", "autoArriveToggle", "excludeStartEndToggle", "enableLocationBtn", "enableCameraBtn",
+   "presenceModal", "presenceAddress", "presencePresentBtn", "presencePhotoBtn", "presencePhotoLabel", "presenceAbsentBtn", "presenceCancelBtn",
+   "nameModal", "nameInput", "nameConfirmBtn", "nameCancelBtn",
+   "sigScreen", "sigName", "sigCanvas", "sigClearBtn", "sigCancelBtn", "sigConfirmBtn", "photoInput"]
     .forEach((id) => { els[id] = document.getElementById(id); });
 
   let currentStops = [];
@@ -70,6 +73,7 @@
 
   async function refresh() {
     currentStops = await RTDB.getStops();
+    RTList.setLegs(currentRoute ? currentRoute.legs : null);
     RTList.render(currentStops);
     if (mapReady) RTMap.update(currentStops, currentRoute && currentRoute.geometry, currentRoute && currentRoute.restrictions);
     const count = await RTDB.countQueue();
@@ -89,15 +93,50 @@
   // backgrounded for hours on a shift) can never leave a stop marked
   // delivered locally with nothing queued to tell the server about it.
   // See sync.js for what happens to the queue from here.
-  async function setStopStatus(id, status, reason) {
+  // `proof` ({ type, name, blob }, from proof.js) rides along in the
+  // queue item — the blob lives in IndexedDB until sync.js has uploaded
+  // it — while the stop itself only keeps the label-worthy part.
+  async function setStopStatus(id, status, reason, proof) {
     const clientTimestamp = new Date().toISOString();
     await RTDB.updateStopAndEnqueue(
       id,
-      { status, statusReason: reason || null, clientTimestamp, dirty: true },
-      { stopId: id, status, reason: reason || null, clientTimestamp }
+      { status, statusReason: reason || null, clientTimestamp, dirty: true, proof: proof ? { type: proof.type, name: proof.name } : null },
+      { stopId: id, status, reason: reason || null, clientTimestamp, proof: proof || null }
     );
     await refresh();
     RTSync.kick();
+  }
+
+  // A live update (applyRouteUpdate) can renumber every id while the
+  // signature pad is open — the mark must still land on the same
+  // address, so the id is re-resolved by its address hash at the moment
+  // of marking.
+  function liveId(id) {
+    const hash = String(id).split("-")[1];
+    const match = currentStops.find((s) => s.id.endsWith("-" + hash));
+    return match ? match.id : id;
+  }
+
+  // ✓ → Presente / Ausente (proof.js); only then is the stop marked.
+  function deliverWithProof(id) {
+    RTDB.getStop(id).then((stop) => stop && RTProof.start(stop, {
+      onDelivered: (stopId, proof) => setStopStatus(liveId(stopId), "delivered", null, proof),
+      onAbsentNoDeposit: (stopId) => setStopStatus(liveId(stopId), "failed", RTI18n.t("reason_no_one_home")),
+    }));
+  }
+
+  // A pushed (SSE) or re-fetched copy of today's route: the office
+  // changed the list. Only ever applied to the route already loaded —
+  // a different token means a different day, and that goes through the
+  // explicit scan/replace flow instead.
+  async function applyRouteUpdate(data) {
+    if (!currentRoute || !data || data.token !== currentRoute.token) return;
+    const before = currentStops.map((s) => s.id).join("|");
+    await RTDB.saveRoute({ token: data.token, expiresAt: data.expiresAt, roundTrip: data.route.roundTrip, createdAt: data.route.createdAt, geometry: data.route.geometry, legs: data.route.legs || [], restrictions: data.route.restrictions || [] });
+    await RTDB.replaceStops(data.stops);
+    currentRoute = { token: data.token, expiresAt: data.expiresAt, geometry: data.route.geometry, legs: data.route.legs || [], restrictions: data.route.restrictions || [] };
+    await refresh();
+    if (currentStops.map((s) => s.id).join("|") !== before) RTList.showToast(RTI18n.t("routeUpdated"));
   }
 
   function friendlyImportError(status, networkFailed) {
@@ -135,12 +174,13 @@
       await RTDB.clearAll();
     }
 
-    await RTDB.saveRoute({ token: data.token, expiresAt: data.expiresAt, roundTrip: data.route.roundTrip, createdAt: data.route.createdAt, geometry: data.route.geometry, restrictions: data.route.restrictions || [] });
+    await RTDB.saveRoute({ token: data.token, expiresAt: data.expiresAt, roundTrip: data.route.roundTrip, createdAt: data.route.createdAt, geometry: data.route.geometry, legs: data.route.legs || [], restrictions: data.route.restrictions || [] });
     // The server's order is final — never re-sorted or re-numbered here.
     await RTDB.saveStops(data.stops.map((s) => ({ ...s, dirty: false })));
 
-    currentRoute = { token: data.token, expiresAt: data.expiresAt, geometry: data.route.geometry, restrictions: data.route.restrictions || [] };
+    currentRoute = { token: data.token, expiresAt: data.expiresAt, geometry: data.route.geometry, legs: data.route.legs || [], restrictions: data.route.restrictions || [] };
     RTSync.setToken(data.token);
+    RTSync.startLive(data.token, applyRouteUpdate);
     mapReady = false; // force RTMap.init() again if a previous route had already built the map
     setLoading(false);
     history.replaceState(null, "", "/pwa/");
@@ -201,6 +241,18 @@
   function registerServiceWorker() {
     if (!("serviceWorker" in navigator)) return;
     navigator.serviceWorker.register("/pwa/sw.js").catch(() => { /* offline shell just won't be cached — the app still works online */ });
+    // A new sw.js (bumped SHELL_CACHE_NAME) takes over mid-session via
+    // skipWaiting()+claim() — but this page's own JS/CSS came from the OLD
+    // cache and stays stale until the next load. Reload once, right
+    // then, so a deploy reaches the phone on the first open, not the
+    // second. Guarded: the very first install also fires controllerchange
+    // (no previous controller), and that one must not reload.
+    let hadController = !!navigator.serviceWorker.controller;
+    navigator.serviceWorker.addEventListener("controllerchange", () => {
+      if (!hadController) { hadController = true; return; }
+      if (!els.sigScreen.hidden) return; // never yank a signature pad away mid-stroke
+      location.reload();
+    });
   }
 
   // Reflects the browser's actual, current permission state on each
@@ -288,13 +340,22 @@
     wireSettings();
     registerServiceWorker();
     RTList.init(
-      { counterPending: els.counterPending, counterDone: els.counterDone, countPending: els.countPending, countDone: els.countDone, doneHeader: els.doneHeader, listPending: els.listPending, listDone: els.listDone, toast: els.toast, stopModal: els.stopModal, modalAddress: els.modalAddress, modalMeta: els.modalMeta, modalDeliveredBtn: els.modalDeliveredBtn, modalFailedBtn: els.modalFailedBtn, modalCancelBtn: els.modalCancelBtn, reasonModal: els.reasonModal, reasonFreeText: els.reasonFreeText, reasonConfirmBtn: els.reasonConfirmBtn, reasonCancelBtn: els.reasonCancelBtn },
+      { counterPending: els.counterPending, counterDone: els.counterDone, countPending: els.countPending, countDone: els.countDone, doneHeader: els.doneHeader, listPending: els.listPending, listDone: els.listDone, toast: els.toast, stopModal: els.stopModal, modalAddress: els.modalAddress, modalCopyBtn: els.modalCopyBtn, modalMapsLink: els.modalMapsLink, modalMeta: els.modalMeta, modalDeliveredBtn: els.modalDeliveredBtn, modalFailedBtn: els.modalFailedBtn, modalCancelBtn: els.modalCancelBtn, reasonModal: els.reasonModal, reasonFreeText: els.reasonFreeText, reasonConfirmBtn: els.reasonConfirmBtn, reasonCancelBtn: els.reasonCancelBtn },
       {
         onMarkStop: setStopStatus,
+        onDeliver: deliverWithProof,
         onUndo: (id) => setStopStatus(id, "pending", null),
         getStop: (id) => RTDB.getStop(id),
       }
     );
+    RTProof.init({
+      presenceModal: els.presenceModal, presenceAddress: els.presenceAddress, presencePresentBtn: els.presencePresentBtn,
+      presencePhotoBtn: els.presencePhotoBtn, presencePhotoLabel: els.presencePhotoLabel,
+      presenceAbsentBtn: els.presenceAbsentBtn, presenceCancelBtn: els.presenceCancelBtn,
+      nameModal: els.nameModal, nameInput: els.nameInput, nameConfirmBtn: els.nameConfirmBtn, nameCancelBtn: els.nameCancelBtn,
+      sigScreen: els.sigScreen, sigName: els.sigName, sigCanvas: els.sigCanvas, sigClearBtn: els.sigClearBtn,
+      sigCancelBtn: els.sigCancelBtn, sigConfirmBtn: els.sigConfirmBtn, photoInput: els.photoInput,
+    });
     wireNav();
     RTSync.onQueueChange(updateSyncBadge);
     RTSync.start();
@@ -311,6 +372,7 @@
     if (stored) {
       currentRoute = stored;
       RTSync.setToken(stored.token);
+      RTSync.startLive(stored.token, applyRouteUpdate);
       // Belt-and-suspenders for the same gap updateStopAndEnqueue() closes
       // going forward — re-queues any stop still marked dirty with no
       // matching queue entry (old data from before that fix, or any other

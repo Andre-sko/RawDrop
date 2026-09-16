@@ -13,7 +13,7 @@ const assert = require("node:assert");
 const tempDir = fs.mkdtempSync(path.join(os.tmpdir(), "route-shares-test-"));
 process.env.DATA_DIR = tempDir;
 
-const { createRouteShare, getRouteShare, getShareStatus, updateStopStatus } = require("../src/routeShares");
+const { createRouteShare, getRouteShare, getShareStatus, updateStopStatus, replaceRouteShareStops } = require("../src/routeShares");
 const { flushSaves } = require("../src/cache");
 
 after(() => {
@@ -178,5 +178,60 @@ describe("updateStopStatus", () => {
     const share = makeShare();
     assert.strictEqual(updateStopStatus("nope", share.stops[0].id, { status: "delivered" }).error, "not_found");
     assert.strictEqual(updateStopStatus(share.token, "nope", { status: "delivered" }).error, "stop_not_found");
+  });
+});
+
+// The office re-shares the SAME link after a re-optimization (see
+// POST /api/share/route with `token`): the stops are rebuilt in the new
+// order, but a stop the driver already closed must not reopen just
+// because its position changed.
+describe("replaceRouteShareStops", () => {
+  test("keeps status and proof by address across a reorder, resets the rest", () => {
+    const share = makeShare();
+    updateStopStatus(share.token, share.stops[2].id, { status: "delivered", clientTimestamp: "2026-09-16T08:00:00.000Z" });
+    share.stops[2].proof = { type: "signature", name: "Ana", file: "x.png", at: "2026-09-16T08:00:00.000Z" };
+
+    const updated = replaceRouteShareStops(share.token, {
+      addresses: ["Rua A 1", "Rua C 3", "Rua D 4"],
+      coords: [{ lat: 46.2, lng: 7.3 }, { lat: 46.4, lng: 7.5 }, null],
+      deadlines: [null, null, null],
+      roundTrip: false,
+    });
+
+    assert.strictEqual(updated.token, share.token);
+    assert.deepStrictEqual(updated.stops.map((s) => s.address), ["Rua A 1", "Rua C 3", "Rua D 4"]);
+    assert.deepStrictEqual(updated.stops.map((s) => s.order), [0, 1, 2]);
+    assert.strictEqual(updated.stops[1].status, "delivered");
+    assert.strictEqual(updated.stops[1].proof.name, "Ana");
+    assert.strictEqual(updated.stops[0].status, "pending");
+    assert.strictEqual(updated.stops[2].status, "pending");
+    assert.strictEqual(getRouteShare(share.token).stops.length, 3);
+  });
+
+  test("returns null for an unknown or expired token", () => {
+    assert.strictEqual(replaceRouteShareStops("nope", { addresses: ["Rua A 1"] }), null);
+  });
+
+  test("a status update sent with the OLD id (offline mark before the reorder) still lands", () => {
+    const share = makeShare();
+    const oldId = share.stops[2].id; // "2-<hash of Rua C 3>"
+    replaceRouteShareStops(share.token, { addresses: ["Rua C 3", "Rua A 1"], roundTrip: false });
+    const result = updateStopStatus(share.token, oldId, { status: "delivered" });
+    assert.strictEqual(result.applied, true);
+    assert.strictEqual(result.stop.address, "Rua C 3");
+    assert.strictEqual(result.stop.order, 0);
+  });
+});
+
+// Per-leg geometry rides along with the share (the phone feeds it to
+// Google Maps as waypoints so its navigation follows our detours).
+describe("legs", () => {
+  const leg = (a, b) => ({ geometry: { type: "LineString", coordinates: [a, b] }, unreachable: false });
+  test("kept on create and replaced with the rest on re-share", () => {
+    const share = makeShare({ legs: [leg([7.3, 46.2], [7.4, 46.3]), leg([7.4, 46.3], [7.5, 46.4])] });
+    assert.strictEqual(share.legs.length, 2);
+    const updated = replaceRouteShareStops(share.token, { addresses: ["Rua A 1", "Rua C 3"], legs: [leg([7.3, 46.2], [7.5, 46.4])] });
+    assert.strictEqual(updated.legs.length, 1);
+    assert.deepStrictEqual(makeShare().legs, []);
   });
 });

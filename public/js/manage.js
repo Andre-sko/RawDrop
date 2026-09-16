@@ -33,6 +33,17 @@
       toBody: (row) => ({ address: row.address, reason: row.reason || '', parkingPoint: row.parkingPoint || '' }),
       copyText: (row) => row.address,
     },
+    'deposit': {
+      api: '/api/deposit',
+      key: 'address',
+      title: 'manageDepositTitle', description: 'manageDepositDescription',
+      columns: [
+        { field: 'address', label: 'manageColAddress', input: 'text' },
+        { field: 'note', label: 'manageColNote', input: 'text', optional: true, placeholder: 'depositNotePlaceholder' },
+      ],
+      toBody: (row) => ({ address: row.address, note: row.note || '' }),
+      copyText: (row) => row.address,
+    },
     'delivery-times': {
       api: '/api/delivery-times',
       key: 'address',

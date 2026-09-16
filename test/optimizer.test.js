@@ -449,3 +449,37 @@ describe("saying which stop a block seals off", () => {
     assert.deepStrictEqual(unreachableStops(m), []);
   });
 });
+
+// ---------------------------------------------------------------------
+// A block on a stop's own doorstep leaves it with NO finite way in (a
+// real case: Wierystrasse 43 in Glis, the block sitting right on its
+// lane). Every order then costs Infinity, and an optimizer that only
+// compares totals sees every candidate tie — so it hands back the order
+// it was given, with the stop still sitting in the wrong cluster and
+// every OTHER stop left un-optimized too. It has to keep optimizing the
+// rest of the round around that one impossible edge, and put the stop
+// where the way OUT is cheap.
+// ---------------------------------------------------------------------
+describe("an unreachable stop does not freeze the whole order", () => {
+  // Two clusters on a line: A = {1,2,3} near the start, B = {5,6,7}
+  // further on. Stop 4 is physically inside cluster B (cheap way out to
+  // 6) but the given order has it stuck inside cluster A.
+  const pos = { 0: 0, 1: 10, 2: 20, 3: 30, 5: 100, 4: 110, 6: 120, 7: 130 };
+  const n = 8;
+  const m = Array.from({ length: n }, (_, i) =>
+    Array.from({ length: n }, (_, j) => Math.abs(pos[i] - pos[j]) * 10));
+  for (let i = 0; i < n; i++) if (i !== 4) m[i][4] = Infinity; // nobody can drive in
+
+  test("the rest of the round is still optimized and the stop lands next to its cheap neighbours", () => {
+    const given = [0, 1, 4, 2, 3, 7, 6, 5]; // 4 stuck in cluster A, cluster B backwards
+    const reordered = given.map((i) => given.map((j) => m[i][j]));
+    const order = optimizeOrder(reordered, false, {}).map((i) => given[i]);
+    const posOf4 = order.indexOf(4);
+    // Exactly one Infinity edge is unavoidable (the one INTO 4) — so the
+    // rest has to be a clean sweep along the line.
+    assert.deepStrictEqual(order.filter((i) => i !== 4), [0, 1, 2, 3, 5, 6, 7]);
+    // ...and 4 sits between its real neighbours, not back in cluster A.
+    assert.ok([5, 6].includes(order[posOf4 - 1]) || [5, 6, 7].includes(order[posOf4 + 1]),
+      `stop 4 ended up at ${order.join(",")}`);
+  });
+});
