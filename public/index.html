@@ -220,6 +220,7 @@ Torre de Belém, Lisboa"></textarea>
             <div id="pinStyleGroup" style="display:none;gap:8px;">
               <button class="map-tool-btn" id="pinStyleClassic" type="button" data-pin-style="classic" data-i18n="pinStyleClassic">Clássico</button>
               <button class="map-tool-btn" id="pinStyleModern" type="button" data-pin-style="modern" data-i18n="pinStyleModern">Moderno</button>
+              <button class="map-tool-btn" id="pinStyleLegacy" type="button" data-pin-style="legacy" data-i18n="pinStyleLegacy">Antigo</button>
             </div>
             <div class="anim-speed-group" id="animSpeedGroup" style="display:none;">
               <button class="anim-speed-btn" data-speed="0.5" type="button">0.5x</button>
@@ -237,6 +238,7 @@ Torre de Belém, Lisboa"></textarea>
             <button class="map-style-btn" id="mapStyleTopo" type="button" data-style="topo" data-i18n="mapStyleTopo">Topográfico</button>
             <button class="map-style-btn" id="mapStyleLight" type="button" data-style="light" data-i18n="mapStyleLight">Minimalista</button>
             <button class="map-style-btn" id="mapStyleSatellite" type="button" data-style="satellite" data-i18n="mapStyleSatellite">Satélite</button>
+            <button class="map-style-btn" id="mapStyleTopoClassic" type="button" data-style="topoClassic" data-i18n="mapStyleTopoClassic">Topográfico (OSM)</button>
           </div>
           <div id="mapEmptyState" class="empty-state" data-i18n="mapEmptyState">Calcula uma rota para a veres no mapa.</div>
           <div id="mapComparisonPanel" class="map-comparison-panel" style="display:none;"></div>
@@ -355,6 +357,7 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
 <script src="/js/translations.js"></script>
 <script src="/js/stop-dedupe.js"></script>
 <script src="https://unpkg.com/maplibre-gl@5.24.0/dist/maplibre-gl.js"></script>
+<script src="https://unpkg.com/jspdf@2.5.2/dist/jspdf.umd.min.js"></script>
 <script src="/js/map.js"></script>
 <script>
 (async function(){
@@ -1742,12 +1745,95 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
     }, null, 2);
   }
 
+  // Loads an image (svg or raster) and rasterizes it onto a canvas — jsPDF's
+  // addImage expects PNG bytes and can't decode an <img> pointed at raw SVG
+  // XML itself, but it happily reads a canvas. Downscaled to icon-in-a-PDF
+  // size (the source SVG is 512x512) so the embedded PNG stays small.
+  // Cached per src so repeated exports don't reload the pin icons.
+  const _imageCache = {};
+  const PIN_ICON_RASTER_SIZE = 96;
+  function loadImageAsCanvas(src){
+    if(_imageCache[src]) return _imageCache[src];
+    _imageCache[src] = new Promise((resolve, reject) => {
+      const img = new Image();
+      img.onload = () => {
+        const scale = PIN_ICON_RASTER_SIZE / Math.max(img.naturalWidth, img.naturalHeight);
+        const canvas = document.createElement('canvas');
+        canvas.width = Math.round(img.naturalWidth * scale);
+        canvas.height = Math.round(img.naturalHeight * scale);
+        canvas.getContext('2d').drawImage(img, 0, 0, canvas.width, canvas.height);
+        resolve(canvas);
+      };
+      img.onerror = reject;
+      img.src = src;
+    });
+    return _imageCache[src];
+  }
+
+  // Same content as buildTXT, laid out as a PDF page via jsPDF (loaded
+  // from CDN, see the <script> tag next to maplibre-gl). No QR sharing
+  // for this one — /api/share-export only stores text content.
+  async function buildPDF(data){
+    const doc = new window.jspdf.jsPDF();
+    const marginX = 14;
+    const maxWidth = doc.internal.pageSize.getWidth() - marginX * 2;
+    const pageHeight = doc.internal.pageSize.getHeight();
+    let y = 18;
+    function addLine(text, size, bold){
+      doc.setFontSize(size || 11);
+      doc.setFont(undefined, bold ? 'bold' : 'normal');
+      doc.splitTextToSize(text, maxWidth).forEach(line => {
+        if(y > pageHeight - 15){ doc.addPage(); y = 18; }
+        doc.text(line, marginX, y);
+        y += 7;
+      });
+    }
+    addLine(t('appTitle'), 16, true);
+    y += 2;
+    data.labels.forEach((label, i)=>{
+      if(i === 0){
+        addLine(`1. ${label.address}`);
+      } else {
+        const leg = data.legResults[i-1];
+        const info = leg && !leg.error ? `— ${leg.distanceText}, ${leg.durationText}` : (leg && leg.error ? `— ${leg.error}` : '');
+        addLine(`${i+1}. ${label.address} ${info}`);
+      }
+    });
+    y += 4;
+    buildExportSummary(data).forEach(([label, value]) => addLine(`${label}: ${value}`));
+    y += 4;
+
+    // "Created by ..." line, followed by a pass/fail pin sized to match
+    // its text (on-time: total time <= 8h30, same threshold as the
+    // driver's on-time check elsewhere in the app).
+    const footerSize = 9;
+    doc.setFontSize(footerSize);
+    doc.setFont(undefined, 'normal');
+    if(y > pageHeight - 15){ doc.addPage(); y = 18; }
+    const footerText = t('createdBy');
+    doc.text(footerText, marginX, y);
+    const stopCount = data.labels.length - 1;
+    const totalWithBreakMinutes = data.totalSeconds / 60 + data.breakMinutes + data.stopMinutes * stopCount;
+    const onTime = totalWithBreakMinutes <= 8 * 60 + 30;
+    try{
+      const canvas = await loadImageAsCanvas(onTime ? '/icons/check-pin.svg' : '/icons/failed-pin.png');
+      const iconHeight = footerSize * 0.45; // mm — proportional to the footer text's font size
+      const iconWidth = iconHeight * (canvas.width / canvas.height || 1);
+      // Bottom of the icon sits on the text baseline, level with the line.
+      doc.addImage(canvas, 'PNG', marginX + doc.getTextWidth(footerText) + 2, y - iconHeight, iconWidth, iconHeight);
+    } catch(err){ /* decorative pin — a fetch failure shouldn't break the export */ }
+    y += 7;
+
+    return doc.output('blob');
+  }
+
   // One place to know what each export format produces, shared by the
   // download button, the QR share button and the format <select>.
   const ROUTE_EXPORT_FORMATS = {
     txt:  { ext: 'txt',  mime: 'text/plain',       build: buildTXT, share: buildTXT },
     csv:  { ext: 'csv',  mime: 'text/csv',         build: data => '﻿' + buildCSV(data), share: data => buildCSV(data) },
     json: { ext: 'json', mime: 'application/json', build: buildRouteJSON, share: buildRouteJSON },
+    pdf:  { ext: 'pdf',  mime: 'application/pdf',  build: buildPDF, share: null },
   };
   const ROUTE_EXPORT_FORMAT_KEY = 'route-tracker-route-export-format';
   function routeExportFormat(){
@@ -1766,6 +1852,7 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
     'text/csv': '.csv',
     'text/plain': '.txt',
     'application/json': '.json',
+    'application/pdf': '.pdf',
   };
 
   // Lets the user pick the exact filename AND the folder to save to,
@@ -1786,7 +1873,7 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
   //   'error'       -> the browser has the API, but the call itself
   //                    failed for some other reason (logged to console)
   async function classicDownload(filename, content, mime, reason){
-    const blob = new Blob([content], { type: mime + ';charset=utf-8' });
+    const blob = content instanceof Blob ? content : new Blob([content], { type: mime + ';charset=utf-8' });
     const url = URL.createObjectURL(blob);
     const a = document.createElement('a');
     a.href = url;
@@ -1982,7 +2069,7 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
   async function handleExport(format){
     if(!lastRouteData) return;
     const fmt = ROUTE_EXPORT_FORMATS[format] || ROUTE_EXPORT_FORMATS.txt;
-    const result = await downloadFile(`route_${timestampForFilename()}.${fmt.ext}`, fmt.build(lastRouteData), fmt.mime);
+    const result = await downloadFile(`route_${timestampForFilename()}.${fmt.ext}`, await fmt.build(lastRouteData), fmt.mime);
     if(result.status === 'fallback'){
       showStatus(fallbackNoticeFor(result.reason), 'info');
     }
@@ -2178,7 +2265,9 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
     }
     const exportQrBtn = e.target.closest('.export-qr-btn');
     if(exportQrBtn){
-      handleExportQr(routeExportFormat());
+      const format = routeExportFormat();
+      if(format === 'pdf'){ showStatus(t('exportPdfNoQr'), 'info'); return; }
+      handleExportQr(format);
       return;
     }
   });

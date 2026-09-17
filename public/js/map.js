@@ -188,6 +188,13 @@
       tiles: ['https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}'],
       attribution: 'Tiles &copy; Esri — Source: Esri, Maxar, Earthstar Geographics, and the GIS User Community',
     },
+    // the original topographic style, kept as its own button alongside
+    // the swisstopo 'topo' above instead of being replaced by it.
+    topoClassic: {
+      type: 'raster',
+      tiles: ['a', 'b', 'c'].map((s) => `https://${s}.tile.opentopomap.org/{z}/{x}/{y}.png`),
+      attribution: '&copy; OpenStreetMap contributors, SRTM | &copy; <a href="https://opentopomap.org">OpenTopoMap</a> (CC-BY-SA)',
+    },
   };
   const DEFAULT_MAP_STYLE = 'topo';
   const MAP_STYLE_STORAGE_KEY = 'routeTrackerMapStyle';
@@ -229,7 +236,7 @@
   function loadStoredPinStyle() {
     try {
       const stored = window.localStorage.getItem(PIN_STYLE_STORAGE_KEY);
-      return stored === 'modern' ? 'modern' : DEFAULT_PIN_STYLE;
+      return (stored === 'modern' || stored === 'legacy') ? stored : DEFAULT_PIN_STYLE;
     } catch (_) { return DEFAULT_PIN_STYLE; }
   }
 
@@ -523,6 +530,10 @@
   function applyPinStyle() {
     if (!map || !map.getLayer('stops-circle-layer')) return;
     const modern = pinStyle === 'modern';
+    // 'legacy': the pre-swisstopo look — amber route line matching the
+    // marker colour, no white casing under it. Markers themselves never
+    // changed, so legacy shares every marker rule below with 'classic'.
+    const legacy = pinStyle === 'legacy';
     ensureMapImagesRegistered(); // in case an SVG finished loading after this style switch's addOverlayLayers()
 
     // 'classic': plain numbered circle, unchanged, every stop including
@@ -558,12 +569,16 @@
     // green as it goes (see animation-progress-line-layer just below).
     map.setPaintProperty('route-line-layer', 'line-color', modern
       ? ['case', ['get', 'unreachable'], '#E2665B', ['get', 'optimized'], MODERN_ROUTE_BLUE, MODERN_GREY]
-      : ['case', ['get', 'unreachable'], '#E2665B', ROUTE_BLUE]);
+      : ['case', ['get', 'unreachable'], '#E2665B', legacy ? MODERN_AMBER : ROUTE_BLUE]);
+    // legacy has no halo under the line (that's what it looked like before
+    // the swisstopo base needed one for contrast) — hidden, not removed,
+    // so addOverlayLayers() doesn't have to know about pinStyle at all.
+    map.setLayoutProperty('route-line-casing-layer', 'visibility', legacy ? 'none' : 'visible');
 
     // The traced "already traveled" highlight during "Animar rota" — white
-    // (today's look) in 'classic', green in 'modern' (same green as the
-    // moving marker and the ✓ pin's roundel) so the covered stretch reads
-    // as "done" against the still-blue rest of the route.
+    // (today's look) in 'classic'/'legacy', green in 'modern' (same green
+    // as the moving marker and the ✓ pin's roundel) so the covered stretch
+    // reads as "done" against the still-blue rest of the route.
     map.setPaintProperty('animation-progress-line-layer', 'line-color', modern ? MODERN_PROGRESS_GREEN : '#ffffff');
 
     updateRouteLineDasharray();
@@ -588,7 +603,7 @@
   }
 
   function setPinStyle(styleId) {
-    if ((styleId !== 'classic' && styleId !== 'modern') || styleId === pinStyle) return;
+    if (!['classic', 'modern', 'legacy'].includes(styleId) || styleId === pinStyle) return;
     pinStyle = styleId;
     try { window.localStorage.setItem(PIN_STYLE_STORAGE_KEY, styleId); } catch (_) { /* private browsing etc */ }
     updatePinStyleUI();
