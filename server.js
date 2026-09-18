@@ -412,6 +412,11 @@ app.post("/api/share/:token/stop/:id/proof", proofUpload.single("image"), (req, 
   res.json(result.stop);
 });
 
+// Customer portal (accounts, quotes, orders) — its own session cookie and
+// pages under /portal, registered BEFORE the shared-password protection
+// below on purpose: a customer must never reach the internal tools.
+app.use("/portal", require("./src/portal/routes"));
+
 // -----------------------------------------------------------------------
 // Password authentication (optional, but strongly recommended). Only
 // active if APP_PASSWORD is set in .env. A single shared password,

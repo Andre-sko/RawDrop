@@ -3413,8 +3413,15 @@ Torre de Belém, Lisboa" style="min-height:160px;"></textarea>
     // "Agrupar (a pé)" saves directly to /api/blocked itself (same
     // endpoint section 04's picker uses) — this is only the refresh: the
     // picker/manifest tags need to pick up what the map just saved, and
-    // the driver needs to see whether it actually worked.
-    onBlockedAddressesChanged: ({ successCount, total }) => {
+    // the driver needs to see whether it actually worked. `blocked` itself
+    // (findBlockedMatch()'s data, used by runCalculate and by the
+    // restricted[] flags sent to /api/share/route) is this module's OWN
+    // in-memory copy, from the fetchBlocked() call at startup — without
+    // re-fetching here it stayed stale for the rest of the session, so a
+    // route shared with the driver right after drawing a shape sent
+    // walkOnly: false for addresses just marked walk-only.
+    onBlockedAddressesChanged: async ({ successCount, total }) => {
+      await fetchBlocked();
       refreshBlockedPicker();
       runCalculate(true, true);
       if(successCount === total){

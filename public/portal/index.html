@@ -1,0 +1,175 @@
+<!DOCTYPE html>
+<html lang="pt">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Portal de encomendas</title>
+<style>
+  :root { --bg:#f5f6f8; --card:#fff; --text:#1c1e21; --muted:#6b7280; --accent:#1f6feb; --ok:#16a34a; --warn:#d97706; --err:#dc2626; --border:#e5e7eb; }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:16px/1.4 system-ui,sans-serif; }
+  main { max-width:640px; margin:0 auto; padding:16px; }
+  h1 { font-size:1.4rem; margin:8px 0 16px; }
+  h2 { font-size:1.1rem; margin:0 0 12px; }
+  .card { background:var(--card); border:1px solid var(--border); border-radius:10px; padding:16px; margin-bottom:16px; }
+  label { display:block; font-size:.9rem; color:var(--muted); margin:10px 0 4px; }
+  input, select, textarea, button { width:100%; font:inherit; padding:10px; border:1px solid var(--border); border-radius:8px; }
+  textarea { min-height:70px; resize:vertical; }
+  button { background:var(--accent); color:#fff; border:0; cursor:pointer; margin-top:12px; font-weight:600; }
+  button.secondary { background:transparent; color:var(--accent); }
+  .row { display:flex; gap:8px; }
+  .row > * { flex:1; }
+  .msg { padding:10px; border-radius:8px; margin-top:10px; font-size:.95rem; display:none; }
+  .msg.err { display:block; background:#fee2e2; color:var(--err); }
+  .msg.ok { display:block; background:#dcfce7; color:var(--ok); }
+  .msg.warn { display:block; background:#fef3c7; color:var(--warn); }
+  .quote { font-size:1.3rem; font-weight:700; margin-top:10px; }
+  .quote small { font-size:.85rem; font-weight:400; color:var(--muted); }
+  table { width:100%; border-collapse:collapse; font-size:.92rem; }
+  td, th { text-align:left; padding:8px 4px; border-bottom:1px solid var(--border); vertical-align:top; }
+  .badge { display:inline-block; padding:2px 8px; border-radius:999px; font-size:.8rem; font-weight:600; }
+  .badge.confirmed { background:#dcfce7; color:var(--ok); }
+  .badge.waiting { background:#fef3c7; color:var(--warn); }
+  .topbar { display:flex; justify-content:space-between; align-items:center; }
+  .topbar button { width:auto; margin:0; padding:6px 12px; }
+  .hidden { display:none; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#111418; --card:#1b1f26; --text:#e6e8eb; --muted:#9aa3ad; --border:#2c323b; }
+    .msg.err { background:#3b1111; } .msg.ok { background:#0f2e1a; } .msg.warn { background:#3a2a05; }
+    .badge.confirmed { background:#0f2e1a; } .badge.waiting { background:#3a2a05; }
+  }
+</style>
+</head>
+<body>
+<main>
+  <div class="topbar"><h1>Portal de encomendas</h1><button id="logout" class="secondary hidden">Sair</button></div>
+
+  <section id="auth" class="card">
+    <div class="row">
+      <button id="tabLogin" class="secondary">Entrar</button>
+      <button id="tabRegister" class="secondary">Criar conta</button>
+    </div>
+    <form id="loginForm">
+      <label>Email<input name="email" type="email" required autocomplete="email"></label>
+      <label>Palavra-passe<input name="password" type="password" required autocomplete="current-password"></label>
+      <button>Entrar</button>
+    </form>
+    <form id="registerForm" class="hidden">
+      <label>Nome<input name="name" required autocomplete="name"></label>
+      <label>Email<input name="email" type="email" required autocomplete="email"></label>
+      <label>Telefone<input name="phone" type="tel" autocomplete="tel"></label>
+      <label>Palavra-passe (min. 8)<input name="password" type="password" minlength="8" required autocomplete="new-password"></label>
+      <button>Criar conta</button>
+    </form>
+    <div id="authMsg" class="msg"></div>
+  </section>
+
+  <section id="order" class="card hidden">
+    <h2>Nova encomenda</h2>
+    <form id="orderForm">
+      <label>Morada de entrega
+        <input name="address" list="addrList" required autocomplete="off" placeholder="Rua, número, localidade">
+        <datalist id="addrList"></datalist>
+      </label>
+      <div class="row">
+        <label>Tamanho
+          <select name="size"><option value="S">Pequeno</option><option value="M">Médio</option><option value="L">Grande</option></select>
+        </label>
+        <label>Data pretendida<input name="requestedDate" type="date" required></label>
+      </div>
+      <label>Instruções (opcional)<textarea name="notes" maxlength="500" placeholder="Código da porta, horário, contacto no local…"></textarea></label>
+      <div id="quote" class="quote"></div>
+      <div id="orderMsg" class="msg"></div>
+      <button>Confirmar encomenda</button>
+    </form>
+  </section>
+
+  <section id="orders" class="card hidden">
+    <h2>As minhas encomendas</h2>
+    <table><thead><tr><th>Data</th><th>Morada</th><th>Preço</th><th>Estado</th></tr></thead><tbody id="ordersBody"></tbody></table>
+  </section>
+</main>
+
+<script>
+const $ = (id) => document.getElementById(id);
+const api = async (path, body) => {
+  const r = await fetch("/portal/api" + path, body === undefined ? {} : {
+    method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body),
+  });
+  const data = await r.json().catch(() => ({}));
+  if (!r.ok) throw new Error(data.error || ("erro " + r.status));
+  return data;
+};
+const show = (el, text, kind) => { el.textContent = text; el.className = "msg " + (kind || ""); };
+const formData = (f) => Object.fromEntries(new FormData(f));
+const STATUS_TEXT = { confirmed: "Confirmada", waiting: "Em espera" };
+const chf = (n) => "CHF " + n.toFixed(2);
+
+// ---- auth ----
+$("tabLogin").onclick = () => { $("loginForm").classList.remove("hidden"); $("registerForm").classList.add("hidden"); };
+$("tabRegister").onclick = () => { $("registerForm").classList.remove("hidden"); $("loginForm").classList.add("hidden"); };
+$("loginForm").onsubmit = async (e) => { e.preventDefault(); try { await api("/login", formData(e.target)); enter(); } catch (err) { show($("authMsg"), err.message, "err"); } };
+$("registerForm").onsubmit = async (e) => { e.preventDefault(); try { await api("/register", formData(e.target)); enter(); } catch (err) { show($("authMsg"), err.message, "err"); } };
+$("logout").onclick = async () => { await api("/logout", {}); location.reload(); };
+
+async function enter() {
+  $("auth").classList.add("hidden");
+  $("order").classList.remove("hidden");
+  $("orders").classList.remove("hidden");
+  $("logout").classList.remove("hidden");
+  $("orderForm").requestedDate.min = new Date().toISOString().slice(0, 10);
+  loadOrders();
+}
+
+// ---- address autocomplete ----
+let suggestTimer;
+$("orderForm").address.oninput = (e) => {
+  clearTimeout(suggestTimer);
+  const q = e.target.value.trim();
+  if (q.length < 3) return;
+  suggestTimer = setTimeout(async () => {
+    const list = await api("/address-suggest?q=" + encodeURIComponent(q)).catch(() => []);
+    $("addrList").innerHTML = list.map((s) => `<option value="${s.replace(/"/g, "&quot;")}">`).join("");
+  }, 250);
+};
+
+// ---- live quote ----
+let quoteTimer;
+async function refreshQuote() {
+  const f = $("orderForm");
+  if (!f.address.value.trim()) return;
+  $("quote").textContent = "A calcular…";
+  try {
+    const q = await api("/quote", { address: f.address.value, size: f.size.value });
+    $("quote").innerHTML = chf(q.priceChf) + ` <small>(${(q.distanceM / 1000).toFixed(1)} km desde o depósito)</small>`;
+  } catch (err) { $("quote").textContent = ""; show($("orderMsg"), err.message, "err"); }
+}
+$("orderForm").address.onchange = () => { clearTimeout(quoteTimer); quoteTimer = setTimeout(refreshQuote, 300); };
+$("orderForm").size.onchange = refreshQuote;
+
+// ---- create order ----
+$("orderForm").onsubmit = async (e) => {
+  e.preventDefault();
+  try {
+    const o = await api("/orders", formData(e.target));
+    show($("orderMsg"), o.status === "confirmed"
+      ? `Encomenda confirmada para ${o.requested_date} — ${chf(o.price_chf)}.`
+      : `Esse dia já está cheio: a encomenda ficou EM ESPERA (${chf(o.price_chf)}). Avisamos assim que houver lugar, ou escolhe outra data.`,
+      o.status === "confirmed" ? "ok" : "warn");
+    e.target.reset(); $("quote").textContent = "";
+    loadOrders();
+  } catch (err) { show($("orderMsg"), err.message, "err"); }
+};
+
+async function loadOrders() {
+  const list = await api("/orders").catch(() => []);
+  $("ordersBody").innerHTML = list.map((o) => `<tr>
+    <td>${o.requested_date}</td><td>${o.address.replace(/</g, "&lt;")}</td><td>${chf(o.price_chf)}</td>
+    <td><span class="badge ${o.status}">${STATUS_TEXT[o.status] || o.status}</span></td></tr>`).join("")
+    || `<tr><td colspan="4" style="color:var(--muted)">Ainda não tens encomendas.</td></tr>`;
+}
+
+api("/me").then(enter).catch(() => {});
+</script>
+</body>
+</html>

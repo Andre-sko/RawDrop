@@ -212,7 +212,7 @@ async function osrmDurationMatrix(locations, mode) {
 //      cases, e.g. only some pairs expired from the cache) is
 //      requested by grouping together whichever origins/destinations
 //      still have something missing.
-async function buildDurationMatrix(locations, mode) {
+async function buildDurationMatrix(locations, mode, { isPairNeeded } = {}) {
   // With OSRM there's no per-element cost and no request-size limits to
   // work around, so the elaborate cache/batching dance below (which
   // exists purely to keep Google's bill down) isn't worth it — one
@@ -233,10 +233,20 @@ async function buildDurationMatrix(locations, mode) {
 
   const n = locations.length;
   const durations = Array.from({ length: n }, () => new Array(n).fill(Infinity));
-  const missing = Array.from({ length: n }, () => new Array(n).fill(true));
+  // `isPairNeeded` (optional): overlayWalkingMatrix's Google fallback only
+  // ever reads a cell when one of its two stops is walk-only — a route
+  // with a handful of walk-only stops among a hundred "normal" ones used
+  // to request the FULL NxN grid anyway, all through this same function,
+  // which meant a single walk-only stop on a large route could burst
+  // hundreds of Distance Matrix requests and trip Google's OVER_QUERY_LIMIT
+  // for no reason. Marking the unneeded cells "not missing" up front (never
+  // fetched, left at Infinity, never read) keeps every other cache/batching
+  // behavior below identical.
+  const missing = Array.from({ length: n }, (_, i) => new Array(n).fill(0).map((_, j) => !isPairNeeded || isPairNeeded(i, j)));
 
   for (let i = 0; i < n; i++) {
     for (let j = 0; j < n; j++) {
+      if (!missing[i][j]) continue;
       const cached = getFromCache(distanceCache, distanceCacheKey(locations[i], locations[j], mode, "google"), DISTANCE_CACHE_TTL_MS);
       if (cached !== undefined) {
         durations[i][j] = cached.durationSeconds;
@@ -362,7 +372,9 @@ async function overlayWalkingMatrix(drivingMatrix, locations, restrictedFlags, w
   const anyRestricted = restrictedFlags.some(Boolean);
   if (!anyRestricted) return drivingMatrix;
 
-  const walkingMatrix = walkingMatrixOverride || await buildDurationMatrix(locations, "walking");
+  const walkingMatrix = walkingMatrixOverride || await buildDurationMatrix(locations, "walking", {
+    isPairNeeded: (i, j) => restrictedFlags[i] || restrictedFlags[j],
+  });
   const n = locations.length;
   const merged = Array.from({ length: n }, () => new Array(n).fill(Infinity));
 
