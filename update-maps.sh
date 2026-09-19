@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Route Tracker — refresh the map data behind OSRM and Valhalla.
+# Rawdrop — refresh the map data behind OSRM and Valhalla.
 #
 # The OpenStreetMap extract under switzerland/ is a snapshot. Roads get
 # built, closed, renamed and re-numbered, and a graph built months ago
@@ -156,7 +156,7 @@ http_ok() { # http_ok URL  -> is something answering there?
 
 # ------------------------------------------------------------------ setup
 
-printf '%s%sRoute Tracker — map data update%s\n' "$BOLD" "$CYAN" "$RESET"
+printf '%s%sRawdrop — map data update%s\n' "$BOLD" "$CYAN" "$RESET"
 
 PBF_NAME="$(basename "$REGION_URL")"
 PBF_PATH="$REGION_DIR/$PBF_NAME"

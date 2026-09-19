@@ -3,7 +3,8 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Portal de encomendas</title>
+<title>Rawdrop Delivery — Portal de Encomendas</title>
+<meta name="description" content="Rawdrop Delivery — peça a recolha da sua encomenda, acompanhe o preço e o estado em tempo real.">
 <style>
   :root { --bg:#f5f6f8; --card:#fff; --text:#1c1e21; --muted:#6b7280; --accent:#1f6feb; --ok:#16a34a; --warn:#d97706; --err:#dc2626; --border:#e5e7eb; }
   * { box-sizing:border-box; }
@@ -33,6 +34,9 @@
   .topbar { display:flex; justify-content:space-between; align-items:center; }
   .topbar button { width:auto; margin:0; padding:6px 12px; }
   .hidden { display:none; }
+  .brand h1 { margin:0; line-height:1.1; }
+  .brand .tagline { font-weight:500; color:var(--accent); }
+  .brand p { margin:2px 0 0; font-size:.85rem; color:var(--muted); }
   @media (prefers-color-scheme: dark) {
     :root { --bg:#111418; --card:#1b1f26; --text:#e6e8eb; --muted:#9aa3ad; --border:#2c323b; }
     .msg.err { background:#3b1111; } .msg.ok { background:#0f2e1a; } .msg.warn { background:#3a2a05; }
@@ -42,7 +46,13 @@
 </head>
 <body>
 <main>
-  <div class="topbar"><h1>Portal de encomendas</h1><button id="logout" class="secondary hidden">Sair</button></div>
+  <div class="topbar">
+    <div class="brand">
+      <h1>Rawdrop <span class="tagline">Delivery</span></h1>
+      <p>Portal de encomendas</p>
+    </div>
+    <button id="logout" class="secondary hidden">Sair</button>
+  </div>
 
   <section id="auth" class="card">
     <div class="row">

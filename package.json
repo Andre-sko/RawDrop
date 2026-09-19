@@ -1,5 +1,5 @@
 {
-  "name": "route-tracker",
+  "name": "rawdrop",
   "version": "1.0.0",
   "description": "Interface web para calcular distancia, tempo e horario de uma rota de enderecos, com proxy seguro para a Google Distance Matrix API e geocodificacao hibrida (swisstopo gratis para enderecos suicos, Google como recurso). Inclui ferramenta de extracao de enderecos a partir de video/foto (requer ffmpeg e tesseract-ocr instalados no sistema).",
   "main": "server.js",

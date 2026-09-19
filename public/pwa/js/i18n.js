@@ -11,7 +11,7 @@
 
   const T = {
     pt: {
-      appTitle: "Route Tracker — Entregas",
+      appTitle: "Rawdrop — Entregas",
       scanIntro: "Digitaliza o código QR partilhado pela ferramenta de rotas para carregares as tuas entregas de hoje.",
       scanBtn: "📷 Ler código QR",
       pending: "Por entregar",
@@ -105,7 +105,7 @@
       close: "Fechar",
     },
     en: {
-      appTitle: "Route Tracker — Deliveries",
+      appTitle: "Rawdrop — Deliveries",
       scanIntro: "Scan the QR code shared by the route tool to load today's deliveries.",
       scanBtn: "📷 Scan QR code",
       pending: "To deliver",
@@ -199,7 +199,7 @@
       close: "Close",
     },
     fr: {
-      appTitle: "Route Tracker — Livraisons",
+      appTitle: "Rawdrop — Livraisons",
       scanIntro: "Scanne le code QR partagé par l'outil d'itinéraires pour charger tes livraisons du jour.",
       scanBtn: "📷 Lire le code QR",
       pending: "À livrer",
@@ -293,7 +293,7 @@
       close: "Fermer",
     },
     de: {
-      appTitle: "Route Tracker — Lieferungen",
+      appTitle: "Rawdrop — Lieferungen",
       scanIntro: "Scanne den vom Routen-Tool geteilten QR-Code, um die heutigen Lieferungen zu laden.",
       scanBtn: "📷 QR-Code scannen",
       pending: "Zu liefern",
@@ -387,7 +387,7 @@
       close: "Schließen",
     },
     it: {
-      appTitle: "Route Tracker — Consegne",
+      appTitle: "Rawdrop — Consegne",
       scanIntro: "Scansiona il codice QR condiviso dallo strumento percorsi per caricare le consegne di oggi.",
       scanBtn: "📷 Leggi codice QR",
       pending: "Da consegnare",

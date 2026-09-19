@@ -78,6 +78,7 @@ async function startServer(options = {}) {
 
   return {
     baseUrl,
+    dataDir,
     output: () => output,
 
     /** Services called since the last call to this function. */

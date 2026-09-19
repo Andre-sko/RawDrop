@@ -36,7 +36,8 @@
 //         clientTimestamp: string | null, // ISO, when the DEVICE says the mark happened
 //         serverTimestamp: string | null, // ISO, when the SERVER received it
 //         updatedAt: string | null,       // == serverTimestamp of the last applied update
-//         proof: { type: "signature" | "photo", name, file, at } | null,  // file: relative to PROOFS_DIR
+//         proof: { type: "signature" | "photo", name, file, at, lat, lng, accuracy } | null,  // file: relative to PROOFS_DIR; lat/lng/accuracy: best-effort navigator.geolocation fix, null when denied/unavailable
+//         encomendaId: number | null,  // src/parcels/db.js row matched by address at share time (server.js) — this module never reads/writes that db itself
 //       }
 //     ]
 //   }
@@ -145,7 +146,7 @@ function pruneExpired() {
 // `addresses[i]` — the caller (server.js) is responsible for that
 // alignment; a missing or malformed entry just leaves that stop's
 // lat/lng or deadline null rather than failing the whole share.
-function buildStops({ addresses, coords, deadlines, roundTrip, originalAddresses, restrictedFlags, depositFlags }) {
+function buildStops({ addresses, coords, deadlines, roundTrip, originalAddresses, restrictedFlags, depositFlags, encomendaIds }) {
   return addresses.map((address, i) => {
     const c = coords && coords[i];
     const deadline = deadlines && typeof deadlines[i] === "string" ? deadlines[i] : null;
@@ -178,6 +179,7 @@ function buildStops({ addresses, coords, deadlines, roundTrip, originalAddresses
       serverTimestamp: null,
       updatedAt: null,
       proof: null, // { type: "signature" | "photo", name, file, at } — see server.js's proof upload
+      encomendaId: (encomendaIds && encomendaIds[i]) || null,
     };
   });
 }
@@ -318,12 +320,17 @@ function updateStopStatus(token, id, { status, reason, clientTimestamp } = {}) {
 // update on purpose: the status goes first, small and reliable, and the
 // image follows when there is bandwidth for it. `file` is the path
 // relative to PROOFS_DIR.
-function setStopProof(token, id, { type, name, file }) {
+function setStopProof(token, id, { type, name, file, lat, lng, accuracy }) {
   const share = getRouteShare(token);
   if (!share) return { error: "not_found" };
   const stop = findStop(share, id);
   if (!stop) return { error: "stop_not_found" };
-  stop.proof = { type, name: (name || "").trim() || null, file, at: new Date().toISOString() };
+  stop.proof = {
+    type, name: (name || "").trim() || null, file, at: new Date().toISOString(),
+    lat: Number.isFinite(lat) ? lat : null,
+    lng: Number.isFinite(lng) ? lng : null,
+    accuracy: Number.isFinite(accuracy) ? accuracy : null,
+  };
   persist();
   return { stop };
 }

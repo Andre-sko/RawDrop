@@ -66,6 +66,9 @@
     const form = new FormData();
     form.append("type", item.proof.type);
     if (item.proof.name) form.append("name", item.proof.name);
+    if (Number.isFinite(item.proof.lat)) form.append("lat", item.proof.lat);
+    if (Number.isFinite(item.proof.lng)) form.append("lng", item.proof.lng);
+    if (Number.isFinite(item.proof.accuracy)) form.append("accuracy", item.proof.accuracy);
     form.append("image", item.proof.blob, item.proof.type === "signature" ? "signature.png" : "photo.jpg");
     return fetch(`/api/share/${encodeURIComponent(token)}/stop/${encodeURIComponent(item.stopId)}/proof`, { method: "POST", body: form });
   }
@@ -95,7 +98,7 @@
                 updatedAt: body.updatedAt,
                 dirty: false,
                 lastSyncError: null,
-                ...(body.proof ? { proof: { type: body.proof.type, name: body.proof.name, at: body.proof.at } } : {}),
+                ...(body.proof ? { proof: { type: body.proof.type, name: body.proof.name, at: body.proof.at, lat: body.proof.lat, lng: body.proof.lng } } : {}),
               });
             }
             await RTDB.removeFromQueue(item.id);

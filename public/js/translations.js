@@ -8,7 +8,7 @@ const TRANSLATIONS = {
   pt: {
     htmlLang: 'pt-PT',
     eyebrow: 'Ferramenta de rota',
-    appTitle: 'Route Tracker',
+    appTitle: 'Rawdrop',
     appDescription: 'A tua ferramenta de trabalho para planear rotas — endereços, tempos e paragens, tudo num só lugar.',
     startEndLabel: 'Ponto de partida e chegada',
     startEndSublabel: 'Opcional — se preenchido, é usado automaticamente como primeira e última paragem (viagem de ida e volta)',
@@ -388,7 +388,7 @@ const TRANSLATIONS = {
   en: {
     htmlLang: 'en',
     eyebrow: 'Route tool',
-    appTitle: 'Route Tracker',
+    appTitle: 'Rawdrop',
     appDescription: 'Your work tool for route planning — addresses, times and stops, all in one place.',
     startEndLabel: 'Start and end point',
     startEndSublabel: 'Optional — if filled in, it\'s automatically used as the first and last stop (round trip)',
@@ -768,7 +768,7 @@ const TRANSLATIONS = {
   fr: {
     htmlLang: 'fr',
     eyebrow: 'Outil d\'itinéraire',
-    appTitle: 'Route Tracker',
+    appTitle: 'Rawdrop',
     appDescription: 'Ton outil de travail pour planifier des itinéraires — adresses, temps et arrêts, tout en un seul endroit.',
     startEndLabel: 'Point de départ et d\'arrivée',
     startEndSublabel: 'Optionnel — si rempli, utilisé automatiquement comme première et dernière étape (aller-retour)',
@@ -1148,7 +1148,7 @@ const TRANSLATIONS = {
   de: {
     htmlLang: 'de',
     eyebrow: 'Routen-Tool',
-    appTitle: 'Route Tracker',
+    appTitle: 'Rawdrop',
     appDescription: 'Dein Arbeitswerkzeug für die Routenplanung — Adressen, Zeiten und Stopps, alles an einem Ort.',
     startEndLabel: 'Start- und Zielpunkt',
     startEndSublabel: 'Optional — wenn ausgefüllt, automatisch als erster und letzter Stopp verwendet (Rundfahrt)',
@@ -1528,7 +1528,7 @@ const TRANSLATIONS = {
   it: {
     htmlLang: 'it',
     eyebrow: 'Strumento di rotta',
-    appTitle: 'Route Tracker',
+    appTitle: 'Rawdrop',
     appDescription: 'Il tuo strumento di lavoro per pianificare le rotte — indirizzi, tempi e fermate, tutto in un unico posto.',
     startEndLabel: 'Punto di partenza e arrivo',
     startEndSublabel: 'Opzionale — se compilato, viene usato automaticamente come prima e ultima fermata (andata e ritorno)',

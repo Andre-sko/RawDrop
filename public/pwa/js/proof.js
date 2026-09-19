@@ -3,9 +3,9 @@
 //
 //   ✓ → Presente | Ausente
 //     Presente → recipient's name → full-screen signature pad → delivered
-//                (proof: signature PNG + name)
+//                (proof: signature PNG + name + GPS fix, best-effort)
 //     Ausente  → deposit allowed for this address → camera photo → delivered
-//                (proof: photo JPEG)
+//                (proof: photo JPEG + GPS fix, best-effort)
 //              → no permission → failed, "Ninguém em casa"
 //
 // This file only collects the proof; app.js decides what to store and
@@ -19,9 +19,29 @@
   const t = (k, v) => RTI18n.t(k, v);
   const PHOTO_MAX_PX = 1280; // longest side; a door photo doesn't need 12 megapixels of upload
   const PHOTO_JPEG_QUALITY = 0.8;
+  const GEO_TIMEOUT_MS = 8000;
 
   let els = {};
   let current = null; // { stop, onDelivered, onAbsentNoDeposit }
+  let pendingLocation = null; // Promise<{lat,lng,accuracy}|null>, started as soon as a proof flow opens
+
+  // Neither proof re-encoding (canvas signature, resized photo — see
+  // shrinkPhoto below) carries EXIF, so GPS never rides along for free.
+  // Started the moment the presence modal opens rather than at confirm
+  // time, so the fix (up to GEO_TIMEOUT_MS) mostly overlaps the time the
+  // driver spends signing or aiming the camera instead of adding to it.
+  // Denied/unavailable/timed-out all resolve to null — a missing location
+  // must never block a delivery from being marked.
+  function requestLocation() {
+    if (!("geolocation" in navigator)) return Promise.resolve(null);
+    return new Promise((resolve) => {
+      navigator.geolocation.getCurrentPosition(
+        (pos) => resolve({ lat: pos.coords.latitude, lng: pos.coords.longitude, accuracy: pos.coords.accuracy }),
+        () => resolve(null),
+        { enableHighAccuracy: true, timeout: GEO_TIMEOUT_MS, maximumAge: 30000 }
+      );
+    });
+  }
 
   // --- signature pad -------------------------------------------------------
 
@@ -118,6 +138,7 @@
 
   function start(stop, callbacks) {
     current = { stop, ...callbacks };
+    pendingLocation = requestLocation();
     els.presenceAddress.textContent = stop.address;
     // The camera is always one tap away — the office's deposit list only
     // changes the wording, so a driver is never left without the option
@@ -153,9 +174,9 @@
       const file = els.photoInput.files && els.photoInput.files[0];
       if (!file || !current) { finish(); return; }
       const { stop, onDelivered } = current;
-      const blob = await shrinkPhoto(file);
+      const [blob, location] = await Promise.all([shrinkPhoto(file), pendingLocation]);
       finish();
-      onDelivered(stop.id, { type: "photo", name: null, blob });
+      onDelivered(stop.id, { type: "photo", name: null, blob, ...(location || {}) });
     });
 
     els.nameCancelBtn.addEventListener("click", finish);
@@ -173,9 +194,9 @@
       if (!hasInk || !current) return;
       const { stop, onDelivered } = current;
       const name = els.sigName.textContent;
-      const blob = await canvasToBlob(els.sigCanvas, "image/png");
+      const [blob, location] = await Promise.all([canvasToBlob(els.sigCanvas, "image/png"), pendingLocation]);
       finish();
-      onDelivered(stop.id, { type: "signature", name, blob });
+      onDelivered(stop.id, { type: "signature", name, blob, ...(location || {}) });
     });
   }
 

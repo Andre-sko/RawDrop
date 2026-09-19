@@ -54,6 +54,58 @@ const {
   updateStopStatus, setStopProof,
 } = require("./src/routeShares");
 const shareEvents = require("./src/shareEvents");
+// Parcels ("encomendas"): a separate sqlite store (src/parcels/db.js) from
+// the JSON-based route shares above. Linked here, not inside
+// routeShares.js, by matching address text — the same technique
+// deposit.json already uses — so each stays independently testable and
+// neither needs to know the other's shape. A stop only carries an
+// encomendaId when a 'received'/'in_route' parcel matched its address at
+// share-creation time (see buildEncomendaIds below); most routes have
+// none, and that's fine — this mirroring is best-effort, never load-bearing
+// for the route share itself.
+const parcelsDb = require("./src/parcels/db").openDb();
+
+// Matches route-share addresses to parcels waiting to ride a route, using
+// the same normalizeKey-on-address technique deposit.json already uses
+// (normalizeKey is defined further down; hoisted, so the order here is
+// fine). Only 'received' or already 'in_route' parcels are candidates —
+// a delivered/failed/returned one must never be silently re-attached just
+// because a later, unrelated stop reuses its address.
+function matchEncomendaIds(addresses, originals) {
+  const candidates = [...parcelsDb.listEncomendasByStatus("received"), ...parcelsDb.listEncomendasByStatus("in_route")];
+  const byAddress = new Map(candidates.map((e) => [normalizeKey(e.endereco), e.id]));
+  return addresses.map((a, i) => byAddress.get(normalizeKey((originals && originals[i]) || a)) || null);
+}
+
+// Best-effort: a parcels-db hiccup must never break creating or
+// re-sharing the route itself, so every call here is swallowed, not
+// propagated.
+function assignEncomendasToShare(share) {
+  for (const stop of share.stops) {
+    if (!stop.encomendaId) continue;
+    try {
+      parcelsDb.assignToRoute(stop.encomendaId, { routeShareToken: share.token, routeStopId: stop.id });
+    } catch (err) {
+      console.error("Aviso: nao foi possivel ligar a encomenda", stop.encomendaId, "a rota:", err.message);
+    }
+  }
+}
+
+// Maps a route-stop status onto the encomenda lifecycle: "pending" is the
+// undo/reset case (back on the route, nothing decided yet), the other two
+// are final for the day. Wrapped the same way as assignEncomendasToShare —
+// best-effort, never blocks the driver-facing response.
+const STOP_TO_ENCOMENDA_STATUS = { pending: "in_route", delivered: "delivered", failed: "failed" };
+function mirrorStopToEncomenda(stop, extra = {}) {
+  if (!stop || !stop.encomendaId) return;
+  const status = STOP_TO_ENCOMENDA_STATUS[stop.status];
+  if (!status) return;
+  try {
+    parcelsDb.recordProof(stop.encomendaId, { status, ...extra });
+  } catch (err) {
+    console.error("Aviso: nao foi possivel atualizar a encomenda", stop.encomendaId, ":", err.message);
+  }
+}
 
 // Resolves addresses to [lng, lat] points, skipping any that fail to
 // geocode — used only to decide which restrictions are geographically
@@ -245,7 +297,7 @@ function renderAddressesSharePage(addresses) {
   const items = addresses.map((a) => `<li>${escapeHtmlServer(a)}</li>`).join("");
   return `<!DOCTYPE html>
 <html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Route Tracker — shared addresses</title>
+<title>Rawdrop — shared addresses</title>
 <style>
   body{background:#14171c;color:#e8e6e1;font-family:-apple-system,BlinkMacSystemFont,'Segoe UI',sans-serif;padding:20px;max-width:480px;margin:0 auto;}
   h1{font-size:15px;font-weight:600;margin:0 0 16px;color:#b7b3a9;}
@@ -370,6 +422,7 @@ app.post("/api/share/:token/stop/:id", (req, res) => {
   if (result.error === "stop_not_found") return res.status(404).json({ error: "paragem nao encontrada" });
   if (result.error === "invalid_status") return res.status(400).json({ error: "status tem de ser pending, delivered ou failed" });
 
+  if (result.applied) mirrorStopToEncomenda(result.stop);
   res.json({ ...result.stop, applied: result.applied });
 });
 
@@ -395,8 +448,16 @@ const proofUpload = multer({
   limits: { fileSize: 8 * 1024 * 1024 },
   fileFilter: (req, file, cb) => cb(null, /^image\/(png|jpe?g|webp)$/.test(file.mimetype)),
 });
+// lat/lng/accuracy: best-effort navigator.geolocation fix taken on the
+// phone when the proof flow opened (see public/pwa/js/proof.js) — never
+// required, since neither a canvas signature nor a resized photo carries
+// EXIF/GPS of its own, and location must never block a delivery mark.
+function parseCoord(v) {
+  const n = parseFloat(v);
+  return Number.isFinite(n) ? n : null;
+}
 app.post("/api/share/:token/stop/:id/proof", proofUpload.single("image"), (req, res) => {
-  const { type, name } = req.body || {};
+  const { type, name, lat, lng, accuracy } = req.body || {};
   if (!req.file) return res.status(400).json({ error: "image (png/jpeg) e obrigatorio" });
   if (!PROOF_TYPES.includes(type)) {
     try { fs.unlinkSync(req.file.path); } catch (e) { /* ignora */ }
@@ -404,11 +465,16 @@ app.post("/api/share/:token/stop/:id/proof", proofUpload.single("image"), (req, 
   }
   const result = setStopProof(req.params.token, req.params.id, {
     type, name, file: path.relative(PROOFS_DIR, req.file.path),
+    lat: parseCoord(lat), lng: parseCoord(lng), accuracy: parseCoord(accuracy),
   });
   if (result.error) {
     try { fs.unlinkSync(req.file.path); } catch (e) { /* ignora */ }
     return res.status(404).json({ error: result.error === "not_found" ? "link invalido ou expirado" : "paragem nao encontrada" });
   }
+  mirrorStopToEncomenda(result.stop, {
+    proofType: type, proofName: name, proofFile: result.stop.proof && result.stop.proof.file,
+    proofLat: parseCoord(lat), proofLng: parseCoord(lng), proofAccuracyM: parseCoord(accuracy),
+  });
   res.json(result.stop);
 });
 
@@ -458,7 +524,7 @@ if (APP_PASSWORD) {
 <head>
 <meta charset="UTF-8" />
 <meta name="viewport" content="width=device-width, initial-scale=1.0" />
-<title>Route Tracker — Login</title>
+<title>Rawdrop — Login</title>
 <style>
   body{
     margin:0; min-height:100vh; display:flex; align-items:center; justify-content:center;
@@ -483,7 +549,7 @@ if (APP_PASSWORD) {
 </head>
 <body>
   <form class="box" method="POST" action="/login">
-    <h1>Route Tracker</h1>
+    <h1>Rawdrop</h1>
     <p class="sub">Introduz a palavra-passe para continuar.</p>
     ${error ? `<div class="error">${error}</div>` : ""}
     <input type="password" name="password" placeholder="Palavra-passe" autofocus required />
@@ -932,10 +998,11 @@ app.post("/api/share/route", async (req, res) => {
   // addresses — the phone only ever sees the resulting flag.
   const depositKeys = new Set(readDeposit().map((d) => normalizeKey(d.address)));
   const depositFlags = addresses.map((a, i) => depositKeys.has(normalizeKey((originals && originals[i]) || a)));
+  const encomendaIds = matchEncomendaIds(addresses, originals);
 
   const shareParams = {
     addresses, coords, deadlines, roundTrip, geometry, legs, plannedSeconds,
-    originalAddresses: originals, restrictedFlags, depositFlags, restrictions: restrictionsForDriver,
+    originalAddresses: originals, restrictedFlags, depositFlags, encomendaIds, restrictions: restrictionsForDriver,
   };
   // `token`: the office re-sharing today's link after a change — the
   // phone keeps the same QR and gets the new list pushed (SSE). Falls
@@ -943,6 +1010,7 @@ app.post("/api/share/route", async (req, res) => {
   const replaced = typeof token === "string" && token ? replaceRouteShareStops(token, shareParams) : null;
   const share = replaced || createRouteShare(shareParams);
   if (replaced) shareEvents.broadcast(share.token, "route", sharePayload(share));
+  assignEncomendasToShare(share);
 
   try {
     const { url, qrDataUrl, usedLanFallback, lanFallbackFailed, usedManualOverride } = await buildShareUrlAndQr(req, share.token);
@@ -2324,5 +2392,5 @@ app.use((err, req, res, next) => {
 });
 
 app.listen(PORT, () => {
-  console.log(`Route Tracker a correr em http://localhost:${PORT}`);
+  console.log(`Rawdrop a correr em http://localhost:${PORT}`);
 });

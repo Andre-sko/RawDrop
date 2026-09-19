@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Route Tracker — one-time setup.
+# Rawdrop — one-time setup.
 #
 # Walks through every install step and asks before each one, so you can
 # skip whatever is already done. Nothing here is destructive: existing

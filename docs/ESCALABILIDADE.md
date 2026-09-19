@@ -237,3 +237,7 @@ Funnel serve para 1-3 pessoas, não para uma frota), backups automáticos
 Os passos 1-2 dão segurança imediata sem mudar nada do que funciona.
 O passo 3 é obrigatório antes de qualquer coisa "empresa". O passo 5 é
 o produto que descreveste — e é uma integração, não uma reescrita.
+
+
+
+Limite conhecido: o casamento é só por morada de texto — duas encomendas received na mesma morada no mesmo dia, só a última fica ligada. Resolver isso a sério precisa de UI no escritório para escolher a encomenda por paragem, que ainda não existe.

@@ -5,7 +5,9 @@
 
 const { test, describe } = require("node:test");
 const assert = require("node:assert");
+const path = require("node:path");
 const { startServer, postJson, getJson } = require("./helpers/harness");
+const { openDb: openParcelsDb } = require("../src/parcels/db");
 
 const A = "46.9480,7.4470";
 const B = "46.9490,7.4480";
@@ -89,6 +91,9 @@ describe("live share: same QR, pushed updates, proof of delivery", () => {
       const form = new FormData();
       form.append("type", "signature");
       form.append("name", "Ana Silva");
+      form.append("lat", "46.5197");
+      form.append("lng", "6.6323");
+      form.append("accuracy", "12.5");
       form.append("image", new Blob([Buffer.from("89504e470d0a1a0a", "hex")], { type: "image/png" }), "sig.png");
       const up = await fetch(`${s.baseUrl}/api/share/${token}/stop/${stop.id}/proof`, { method: "POST", body: form });
       assert.strictEqual(up.status, 200);
@@ -96,6 +101,21 @@ describe("live share: same QR, pushed updates, proof of delivery", () => {
       assert.strictEqual(body.proof.type, "signature");
       assert.strictEqual(body.proof.name, "Ana Silva");
       assert.match(body.proof.file, new RegExp(`^${token}/${stop.id}\\.png$`));
+      assert.strictEqual(body.proof.lat, 46.5197);
+      assert.strictEqual(body.proof.lng, 6.6323);
+      assert.strictEqual(body.proof.accuracy, 12.5);
+
+      // A stop marked without a GPS fix (denied/unavailable on the phone)
+      // must still go through — location is best-effort, never required.
+      const stop2 = (await getJson(s.baseUrl, "/api/share/" + token)).body.stops[0];
+      const noGeo = new FormData();
+      noGeo.append("type", "photo");
+      noGeo.append("image", new Blob([Buffer.from("ffd8ffe0", "hex")], { type: "image/jpeg" }), "p.jpg");
+      const up2 = await fetch(`${s.baseUrl}/api/share/${token}/stop/${stop2.id}/proof`, { method: "POST", body: noGeo });
+      assert.strictEqual(up2.status, 200);
+      const body2 = await up2.json();
+      assert.strictEqual(body2.proof.lat, null);
+      assert.strictEqual(body2.proof.lng, null);
 
       const bad = new FormData();
       bad.append("type", "selfie");
@@ -115,6 +135,42 @@ describe("live share: same QR, pushed updates, proof of delivery", () => {
       });
       const got = await getJson(s.baseUrl, "/api/share/" + share.body.token);
       assert.deepStrictEqual(got.body.stops.map((x) => x.depositAllowed), [false, true]);
+    } finally { await s.stop(); }
+  });
+
+  test("a parcel matching a stop's address rides the route and is updated on delivery", async () => {
+    const s = await startServer(ENV);
+    try {
+      const parcelsDb = openParcelsDb(path.join(s.dataDir, "parcels.db"));
+      const rawdrop = parcelsDb.findCarrierByCode("rawdrop");
+      const encomenda = parcelsDb.createEncomenda({ carrierId: rawdrop.id, nome: "Cliente Teste", endereco: A });
+
+      const share = await postJson(s.baseUrl, "/api/share/route", { addresses: [A, B], roundTrip: false });
+      const token = share.body.token;
+      const stops = (await getJson(s.baseUrl, "/api/share/" + token)).body.stops;
+      const stopA = stops[0];
+      assert.strictEqual(stopA.encomendaId, encomenda.id);
+      assert.strictEqual(stops[1].encomendaId, null); // B has no matching parcel
+
+      const linked = parcelsDb.findEncomendaById(encomenda.id);
+      assert.strictEqual(linked.status, "in_route");
+      assert.strictEqual(linked.route_share_token, token);
+      assert.strictEqual(linked.route_stop_id, stopA.id);
+
+      await postJson(s.baseUrl, `/api/share/${token}/stop/${stopA.id}`, {
+        status: "delivered", clientTimestamp: new Date().toISOString(),
+      });
+      const form = new FormData();
+      form.append("type", "signature");
+      form.append("name", "Cliente Teste");
+      form.append("image", new Blob([Buffer.from("89504e470d0a1a0a", "hex")], { type: "image/png" }), "sig.png");
+      const up = await fetch(`${s.baseUrl}/api/share/${token}/stop/${stopA.id}/proof`, { method: "POST", body: form });
+      assert.strictEqual(up.status, 200);
+
+      const delivered = parcelsDb.findEncomendaById(encomenda.id);
+      assert.strictEqual(delivered.status, "delivered");
+      assert.strictEqual(delivered.proof_type, "signature");
+      assert.strictEqual(delivered.proof_name, "Cliente Teste");
     } finally { await s.stop(); }
   });
 });

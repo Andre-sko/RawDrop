@@ -1,5 +1,5 @@
 {
-  "name": "Route Tracker — Entregas",
+  "name": "Rawdrop — Entregas",
   "short_name": "Entregas",
   "description": "Lista de entregas do dia, com mapa e sincronização offline.",
   "start_url": "/pwa/",

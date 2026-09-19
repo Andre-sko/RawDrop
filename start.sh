@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 #
-# Route Tracker — day-to-day startup.
+# Rawdrop — day-to-day startup.
 #
 # Asks which routing engine to use, brings up the Docker containers that
 # choice needs, waits until they actually answer, starts the server and
